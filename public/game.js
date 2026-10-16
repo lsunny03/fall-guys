@@ -310,33 +310,35 @@ function makeTag(name, isPlayer) {
 function makeBean(color, name, isPlayer) {
   const group = new THREE.Group();
   const rig = new THREE.Group(); rig.position.y = 0.7; group.add(rig);
+  // `wob` pivots at foot level, so wobbling it moves the top of the bean far more than the bottom.
+  const wob = new THREE.Group(); wob.position.y = -0.65; rig.add(wob);
   const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.38 });
   const shoe = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.5 });
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 0.5, 6, 16), mat);
-  body.castShadow = true; rig.add(body);
+  body.castShadow = true; body.position.y = 0.65; wob.add(body);
 
   const white = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2 });
   const black = new THREE.MeshStandardMaterial({ color: '#1b1230', roughness: 0.2 });
   for (const s of [-1, 1]) {
     const eye = new THREE.Mesh(new THREE.SphereGeometry(0.13, 14, 10), white);
-    eye.position.set(s * 0.15, 0.36, 0.33);
+    eye.position.set(s * 0.15, 1.01, 0.33);
     const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.065, 10, 8), black);
-    pupil.position.set(s * 0.15, 0.36, 0.44);
-    rig.add(eye, pupil);
+    pupil.position.set(s * 0.15, 1.01, 0.44);
+    wob.add(eye, pupil);
   }
-  const mkLimb = (r, len, x, y, m) => {
+  const mkLimb = (r, len, x, y, m, parent = rig) => {
     const pivot = new THREE.Group(); pivot.position.set(x, y, 0);
     const limb = new THREE.Mesh(new THREE.CapsuleGeometry(r, len, 4, 8), m);
     limb.position.y = -(len / 2 + r * 0.6); limb.castShadow = true;
-    pivot.add(limb); rig.add(pivot);
+    pivot.add(limb); parent.add(pivot);
     return pivot;
   };
-  const armL = mkLimb(0.09, 0.2, -0.46, 0.12, mat), armR = mkLimb(0.09, 0.2, 0.46, 0.12, mat);
+  const armL = mkLimb(0.09, 0.2, -0.46, 0.77, mat, wob), armR = mkLimb(0.09, 0.2, 0.46, 0.77, mat, wob);
   const legL = mkLimb(0.12, 0.08, -0.17, -0.4, shoe), legR = mkLimb(0.12, 0.08, 0.17, -0.4, shoe);
   const tag = makeTag(name, isPlayer);
   group.add(tag);
   scene.add(group);
-  return { group, rig, mat, armL, armR, legL, legR, tag, phase: Math.random() * 6, squash: 0, ra: [0, 0, 0, 0] };
+  return { group, rig, wob, mat, armL, armR, legL, legR, tag, phase: Math.random() * 6, squash: 0, ra: [0, 0, 0, 0] };
 }
 
 const lerpTo = (cur, target, k) => cur + (target - cur) * k;
@@ -347,7 +349,7 @@ function animateBean(ch, v, dt, time) {
   v.squash = Math.max(0, v.squash - dt * 3.2);
   const k = 1 - Math.exp(-13 * dt);   // looser follow = jelly lag
 
-  let rx = 0, y = 0.7, rz = 0, aL = 0, aR = 0, az = 0.12, lL = 0, lR = 0;
+  let rx = 0, y = 0.7, rz = 0, wx = 0, wz = 0, wj = 0, aL = 0, aR = 0, az = 0.12, lL = 0, lR = 0;
   if (ch.state === 'dive') {
     rx = 1.3; y = 0.42; aL = aR = Math.PI * 0.92; az = 0.05; lL = 0.2; lR = -0.1;
   } else if (ch.state === 'stun') {
@@ -358,12 +360,15 @@ function animateBean(ch, v, dt, time) {
     lL = Math.sin(time * 14) * 0.5; lR = -lL;
   } else if (!ch.grounded) {
     rx = 0.12; az = 2.1; lL = 0.55; lR = -0.35;
-    rz = Math.sin(time * 8 + ch.id) * 0.14;
+    wz = Math.sin(time * 8 + ch.id) * 0.14;
   } else {
     const s = Math.sin(v.phase);
-    // Wobble: side-to-side waddle and a fore/aft bob, plus a slow idle sway.
-    rx = 0.15 * run + Math.sin(v.phase * 2 + 1) * 0.07 * run;
-    rz = Math.sin(v.phase) * 0.2 * run + Math.sin(time * 2.4 + ch.id) * 0.05;
+    rx = 0.15 * run;
+    // Wobble (on the foot-pivoted `wob` group, so the head swings most): side-to-side waddle,
+    // fore/aft bob, and a slow idle sway.
+    wx = Math.sin(v.phase * 2 + 1) * 0.1 * run;
+    wz = Math.sin(v.phase) * 0.26 * run + Math.sin(time * 2.4 + ch.id) * 0.07;
+    wj = Math.sin(v.phase * 2) * 0.05 * run;
     lL = s * 0.95 * run; lR = -lL; aL = -s * 0.85 * run; aR = -aL;
     y += Math.sin(time * 2.2 + ch.id) * 0.012 + Math.abs(s) * 0.05 * run;
   }
@@ -371,6 +376,9 @@ function animateBean(ch, v, dt, time) {
   r.rotation.x = lerpTo(r.rotation.x, rx, k);
   r.rotation.z = lerpTo(r.rotation.z, rz, k);
   r.position.y = lerpTo(r.position.y, y, k);
+  const kw = 1 - Math.exp(-9 * dt);   // softer follow than the limbs: the top lags like jelly
+  v.wob.rotation.x = lerpTo(v.wob.rotation.x, wx, kw);
+  v.wob.rotation.z = lerpTo(v.wob.rotation.z, wz, kw);
   v.armL.rotation.x = lerpTo(v.armL.rotation.x, aL, k);
   v.armR.rotation.x = lerpTo(v.armR.rotation.x, aR, k);
   v.armL.rotation.z = lerpTo(v.armL.rotation.z, -az, k);
@@ -379,8 +387,9 @@ function animateBean(ch, v, dt, time) {
   v.legR.rotation.x = lerpTo(v.legR.rotation.x, lR, k);
 
   const stretch = clamp(ch.vy * 0.012, -0.08, 0.14) - v.squash * 0.4;
-  const jig = Math.sin(v.phase * 2) * 0.04 * run;   // squishy jelly bounce while running
-  r.scale.set(1 - stretch * 0.5 + jig, 1 + stretch - jig, 1 - stretch * 0.5 + jig);
+  r.scale.set(1 - stretch * 0.5, 1 + stretch, 1 - stretch * 0.5);
+  // Squishy jelly bounce, scaled from the feet so it is also strongest up top.
+  v.wob.scale.set(1 + wj, 1 - wj, 1 + wj);
 
   v.group.position.set(ch.x, ch.y, ch.z);
   v.group.rotation.y = ch.heading + (ch.state === 'done' ? time * 4 : 0);
