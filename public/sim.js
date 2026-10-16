@@ -6,7 +6,7 @@ export const H = 1.4;             // bean collision height
 export const GRAVITY = 32;
 export const JUMP_V = 11.5;
 export const DIVE_V = 13.5;
-export const RUN = 9;
+export const RUN = 8.3;
 export const FALL_Y = -12;        // below this a bean respawns at its checkpoint
 export const STEP = 1 / 120;      // fixed simulation step
 export const QUALIFY = 8;         // finishers that make the cut
@@ -204,7 +204,7 @@ export function resetChar(ch, x, z) {
 
 export function initBot(ch, rnd = Math.random) {
   const skill = rnd();
-  ch.maxSpeed = 7.7 + skill * 1.5;
+  ch.maxSpeed = 7.1 + skill * 1.4;   // scaled with RUN so bots keep pace
   ch.bot = {
     skill, lane: (rnd() - 0.5) * 16, reactT: 0.15 + rnd() * 0.55, wait: 0, stuckT: 0,
     seen: null, willJump: false, nf: 0.6 + rnd() * 1.2, np: rnd() * 6.28,

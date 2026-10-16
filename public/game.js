@@ -307,8 +307,10 @@ function makeTag(name, isPlayer) {
   return sp;
 }
 
+const BEAN_SCALE = 0.86;   // visual size only; collision radius/height live in sim.js
 function makeBean(color, name, isPlayer) {
   const group = new THREE.Group();
+  group.scale.setScalar(BEAN_SCALE);
   const rig = new THREE.Group(); rig.position.y = 0.7; group.add(rig);
   // `wob` pivots at foot level, so wobbling it moves the top of the bean far more than the bottom.
   const wob = new THREE.Group(); wob.position.y = -0.65; rig.add(wob);
@@ -336,6 +338,7 @@ function makeBean(color, name, isPlayer) {
   const armL = mkLimb(0.09, 0.2, -0.46, 0.77, mat, wob), armR = mkLimb(0.09, 0.2, 0.46, 0.77, mat, wob);
   const legL = mkLimb(0.12, 0.08, -0.17, -0.4, shoe), legR = mkLimb(0.12, 0.08, 0.17, -0.4, shoe);
   const tag = makeTag(name, isPlayer);
+  tag.scale.multiplyScalar(1 / BEAN_SCALE);   // keep the name tag its original size
   group.add(tag);
   scene.add(group);
   return { group, rig, wob, mat, armL, armR, legL, legR, tag, phase: Math.random() * 6, squash: 0, ra: [0, 0, 0, 0] };
