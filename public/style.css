@@ -127,3 +127,45 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   .menu-card, .banner.show, .flash.on { animation-duration: .01s; }
 }
+
+/* ---------- multiplayer: menu extras, lobby, spectator ---------- */
+.btn-row.two { grid-template-columns: 1fr 1fr; margin: 12px 0; }
+.join-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin: 0 0 4px; }
+.join-row input {
+  width: 100%; padding: 10px 14px; font: inherit; font-size: 18px; font-weight: 700; letter-spacing: .25em; text-transform: uppercase; text-align: center;
+  color: var(--ink); border: 3px solid var(--ink); border-radius: 14px; background: #fff; outline: none;
+}
+.join-row input::placeholder { letter-spacing: .08em; font-weight: 600; opacity: .4; }
+.join-row input:focus-visible { box-shadow: 0 0 0 4px rgba(58,134,255,.45); }
+.ghost-btn:disabled, .big-btn:disabled { opacity: .55; cursor: progress; transform: none; }
+.menu-err { margin: 10px 0 0; padding: 8px 12px; border-radius: 12px; background: #fff0c2; border: 2px solid var(--ink); font-weight: 600; font-size: 15px; }
+.tag.next { margin: 0 0 12px; font-size: 15px; }
+.ghost-btn.small { padding: 6px 12px; font-size: 14px; border-width: 2px; border-radius: 12px; }
+
+.lobby { position: fixed; left: 0; right: 0; bottom: max(14px, env(safe-area-inset-bottom)); display: grid; place-items: center; padding: 0 12px; pointer-events: none; z-index: 4; }
+.lobby-card {
+  pointer-events: auto; width: min(560px, 100%); padding: 16px 18px 14px; border-radius: 24px; text-align: center;
+  background: var(--card); box-shadow: 0 14px 44px rgba(60, 10, 90, .35), 0 0 0 4px rgba(255,255,255,.6) inset;
+  backdrop-filter: blur(6px); animation: pop .4s cubic-bezier(.2, 1.4, .4, 1) both;
+}
+.lobby-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.room-chip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; font-size: 13px; letter-spacing: .12em; }
+.room-chip b { font-size: 24px; letter-spacing: .2em; padding: 0 10px; border-radius: 10px; background: var(--yellow); border: 2px solid var(--ink); }
+.chip-btn { padding: 4px 10px; font: inherit; font-size: 13px; font-weight: 600; letter-spacing: 0; color: var(--ink); background: #fff; border: 2px solid var(--ink); border-radius: 10px; cursor: pointer; }
+.chip-btn:hover { background: #f1e9ff; }
+.chip-btn:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+.lobby-list { list-style: none; padding: 0; margin: 0 0 10px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; max-height: 84px; overflow-y: auto; }
+.lobby-list li { display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 6px; border-radius: 999px; background: #f3edff; font-weight: 600; font-size: 14px; }
+.lobby-list li.me { background: #ffe9a3; box-shadow: 0 0 0 2px var(--ink); }
+.lobby-list .dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--ink); }
+.lobby-status { margin: 0 0 8px; font-weight: 600; font-size: 18px; }
+.big-btn.compact { font-size: 22px; padding: 10px 16px; margin: 2px 0 6px; }
+.lobby-note { margin: 4px 0 0; font-size: 13px; opacity: .7; }
+
+.spec { position: absolute; left: 50%; top: 70px; transform: translateX(-50%); padding: 5px 16px; border-radius: 14px; background: rgba(43,27,74,.6); font-size: 14px; letter-spacing: .08em; white-space: nowrap; }
+
+@media (max-width: 640px) {
+  .lobby-note { display: none; }
+  .lobby-card { padding: 12px 14px 12px; }
+  .spec { top: 62px; font-size: 12px; }
+}

@@ -5,9 +5,7 @@ import * as S from './sim.js';
 const $ = (id) => document.getElementById(id);
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const TOTAL = 12;
-const TIME_LIMIT = 120;       // seconds before the round is called
 const COLORS = ['#ff4d6d', '#ff9f1c', '#ffd60a', '#7bd72b', '#2ec4b6', '#3a86ff', '#8338ec', '#ff5db1', '#00bbf9', '#fb5607'];
-const BOT_NAMES = ['Bean Machine', 'Jelly Roll', 'Waddles', 'Sir Bounce', 'Cap’n Wobble', 'Pudding', 'Noodle', 'Gizmo', 'Sprout', 'Biscuit', 'Pickles', 'Mochi', 'Zigzag', 'Tater Tot', 'Muffin'];
 const ord = (n) => n + (['th', 'st', 'nd', 'rd'][(n % 100 > 10 && n % 100 < 14) ? 0 : n % 10 < 4 ? n % 10 : 0]);
 
 /* ------------------------------------------------------------------ */
@@ -341,35 +339,6 @@ function makeBean(color, name, isPlayer) {
   return { group, rig, mat, armL, armR, legL, legR, tag, phase: Math.random() * 6, squash: 0, ra: [0, 0, 0, 0] };
 }
 
-const chars = [];     // chars[0] is the player
-const vis = new Map();
-let player;
-
-function populate(playerName, playerColor) {
-  const others = COLORS.filter((c) => c.toLowerCase() !== playerColor.toLowerCase())
-    .sort(() => Math.random() - 0.5);
-  const names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
-  for (let i = 0; i < TOTAL; i++) {
-    const isP = i === 0;
-    const ch = S.createChar({
-      id: i, name: isP ? playerName : names[i - 1], color: isP ? playerColor : others[(i - 1) % others.length], isPlayer: isP,
-    });
-    chars.push(ch);
-    vis.set(ch.id, makeBean(ch.color, ch.name, isP));
-  }
-  player = chars[0];
-}
-
-function setPlayerLook(name, color) {
-  player.name = name; player.color = color;
-  const v = vis.get(player.id);
-  v.mat.color.set(color);
-  v.group.remove(v.tag);
-  v.tag.material.map.dispose(); v.tag.material.dispose();
-  v.tag = makeTag(name, true);
-  v.group.add(v.tag);
-}
-
 const lerpTo = (cur, target, k) => cur + (target - cur) * k;
 function animateBean(ch, v, dt, time) {
   const sp = Math.hypot(ch.vx, ch.vz);
@@ -451,24 +420,271 @@ function updateConfetti(dt) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Room state                                                          */
+/* ------------------------------------------------------------------ */
+const chars = [];           // every bean in the room: humans and bots
+const byId = new Map();
+const vis = new Map();      // id -> bean visuals
+let player = null;          // my bean (null in the menu, or while spectating)
+const STATES = ['run', 'dive', 'stun', 'done'];
+const dots = new Map();
+
+// N: what the server last told us. G: purely local UI state.
+const N = { phase: -1, pt: -1, rt: 0, rtAt: 0, over: false, fin: 0, code: '', pub: false, host: false, synced: false };
+const G = { inRoom: false, shownN: 0, hintT: 0, now: 0 };
+
+function addChar(c, isMe) {
+  const ch = S.createChar({ id: c.i, name: c.n, color: c.c, isPlayer: isMe });
+  ch.human = !!c.h; ch.placed = false;
+  chars.push(ch); byId.set(ch.id, ch);
+  vis.set(ch.id, makeBean(ch.color, ch.name, isMe));
+  return ch;
+}
+function removeChar(ch) {
+  const v = vis.get(ch.id);
+  if (v) {
+    scene.remove(v.group);
+    v.group.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); }
+    });
+  }
+  vis.delete(ch.id); byId.delete(ch.id);
+  chars.splice(chars.indexOf(ch), 1);
+  const d = dots.get(ch.id);
+  if (d) { d.remove(); dots.delete(ch.id); }
+  if (ch === player) player = null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Networking: prediction for me, interpolation for everyone else      */
+/* ------------------------------------------------------------------ */
+world.mirror = true;        // this copy of the world only predicts; the server is the authority
+let ws = null, wsReady = null;
+let simMs = 0;              // my simulation clock (ms): inputs and the history below are stamped with it
+let tOff = 0;               // world time = simMs/1000 + tOff, kept in step with the server's platforms
+let needSnap = false;
+const hist = [];            // my recent predicted positions, to compare against the server's state
+const snapBuf = [];         // recent snapshots of the room, for interpolating other beans
+const INTERP_MS = 110;
+const inp = { jump: false, dive: false };
+let lastSent = { x: 9, z: 9, at: 0 };
+
+function send(msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
+
+function connect() {
+  if (ws && ws.readyState === 1) return Promise.resolve();
+  if (ws && ws.readyState === 0) return wsReady;
+  const sock = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws = sock;
+  wsReady = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { reject(new Error('timeout')); try { sock.close(); } catch { /* already closed */ } }, 7000);
+    sock.onopen = () => { clearTimeout(timer); resolve(); };
+    sock.onerror = () => { clearTimeout(timer); reject(new Error('socket')); };
+  });
+  sock.onmessage = (e) => {
+    let m;
+    try { m = JSON.parse(e.data); } catch { return; }
+    onMessage(m);
+  };
+  sock.onclose = () => {
+    if (ws !== sock) return;
+    ws = null;
+    if (G.inRoom) { toMenu(); menuError('Connection lost. Press Play to reconnect.'); }
+  };
+  return wsReady;
+}
+setInterval(() => send({ t: 'p' }), 15000);       // keep-alive for idle menus
+
+function onMessage(m) {
+  switch (m.t) {
+    case 's': onSnap(m); break;
+    case 'roster': applyRoster(m); break;
+    case 'joined': G.inRoom = true; $('menu').hidden = true; $('menuErr').hidden = true; N.code = m.code; N.pub = !!m.pub; break;
+    case 'results': showResults(m); break;
+    case 'err': menuError(m.msg); break;
+    default: break;
+  }
+}
+
+function applyRoster(m) {
+  N.host = !!m.host; N.code = m.code; N.pub = !!m.pub;
+  const ids = new Set(m.chars.map((c) => c.i));
+  for (const ch of [...chars]) if (!ids.has(ch.id)) removeChar(ch);
+  for (const c of m.chars) {
+    let ch = byId.get(c.i);
+    if (!ch) ch = addChar(c, c.i === m.you);
+    S.resetChar(ch, ch.x, ch.z);      // fresh layout: snapshots place everyone
+    ch.finishT = 0;
+  }
+  player = byId.get(m.you) || null;
+  hist.length = 0; snapBuf.length = 0; needSnap = !!player;
+  cam.lastId = null;
+  renderLobby(m.chars);
+}
+
+function applyTiles(tl) {
+  const seen = new Set();
+  for (const [i, s, cy] of tl) {
+    const c = world.tiles[i];
+    if (!c) continue;
+    seen.add(i);
+    if (s === 1) { c.state = 'shake'; c.active = true; }
+    else if (s === 2) {
+      if (c.state !== 'fall') { c.fv = 0; c.cy = cy; } else if (Math.abs(c.cy - cy) > 1.5) c.cy = cy;
+      c.state = 'fall'; c.active = true;
+    } else { c.state = 'gone'; c.active = false; }
+  }
+  for (let i = 0; i < world.tiles.length; i++) {
+    const c = world.tiles[i];
+    if (seen.has(i) || c.state === 'idle') continue;
+    if (c.state === 'gone') c.pop = 0;               // regrow with a little pop
+    c.state = 'idle'; c.cy = c.baseY; c.active = true; c.fv = 0; c.dy = 0;
+  }
+}
+
+// Move colliders to where the server's clock says they are, without dragging riders along.
+function alignWorld() {
+  world.t = simMs / 1000 + tOff;
+  for (const c of world.colliders) if (c.update) { c.update(c, world, 0); c.dx = c.dy = c.dz = 0; }
+}
+function resetLocalWorld() {
+  S.resetWorld(world);
+  alignWorld();
+  hist.length = 0;
+}
+
+function onSnap(m) {
+  const at = performance.now();
+
+  // Keep my clock aligned with the server's so moving platforms match.
+  if (m.k != null) {
+    const off = m.w - m.k / 1000;
+    if (!N.synced || Math.abs(off - tOff) > 0.25) { tOff = off; N.synced = true; alignWorld(); }
+    else tOff += (off - tOff) * 0.12;
+  } else if (!N.synced) { tOff = m.w - simMs / 1000; alignWorld(); }
+
+  setPhase(m, at);
+  applyTiles(m.tl);
+  N.fin = m.fo.length;
+  m.fo.forEach((id, i) => { const ch = byId.get(id); if (ch) { ch.finishOrder = i; ch.finishT = m.ft[i]; } });
+
+  const map = new Map();
+  for (const a of m.c) map.set(a[0], { x: a[1], y: a[2], z: a[3], vx: a[4], vy: a[5], vz: a[6], h: a[7], st: a[8], fl: a[9] });
+  snapBuf.push({ at, m: map });
+  if (snapBuf.length > 40) snapBuf.shift();
+
+  const mine = player ? map.get(player.id) : null;
+  let adopted = false;
+  for (const [type, id, val] of m.ev) {
+    const ch = byId.get(id);
+    if (!ch) continue;
+    if (type === 'l' && ch !== player) { const v = vis.get(id); if (v) v.squash = Math.min(0.5, val / 35); }
+    if (ch !== player || !mine) continue;
+    if (type === 'r') { adopt(mine, 'r'); adopted = true; flash(); toast('Oops! Back to the checkpoint', 1500); }
+    else if (type === 'b' && player.state !== 'stun') { adopt(mine, 'b'); adopted = true; sfx.bonk(); cam.shake = 0.5; toast('Bonk!', 900); }
+    else if (type === 'f') sfx.fall();
+    else if (type === 'F') onMeFinished();
+  }
+  if (mine) {
+    if (mine.fl & 2) onMeFinished();
+    if (!adopted) reconcile(mine, m.k);
+  }
+}
+
+function adopt(e, kind) {
+  Object.assign(player, { x: e.x, y: e.y, z: e.z, vx: e.vx, vy: e.vy, vz: e.vz, ground: null, grounded: false });
+  if (kind === 'r') { player.state = 'run'; player.stateT = 0; player.invuln = 1.6; player.heading = e.h; }
+  else { player.state = 'stun'; player.stateT = 0.9; }
+  hist.length = 0;
+}
+
+function onMeFinished() {
+  if (player.finished) return;
+  player.finished = true; player.state = 'done'; player.ghost = true; player.wishX = player.wishZ = 0;
+  banner('QUALIFIED!', 'small stay'); sfx.win(); burstConfetti(player);
+}
+
+// Compare where the server put me with where I was when it processed the same input, and nudge.
+function reconcile(e, ack) {
+  if (needSnap) {
+    Object.assign(player, { x: e.x, y: e.y, z: e.z, vx: e.vx, vy: e.vy, vz: e.vz, heading: e.h });
+    needSnap = false; player.placed = true; hist.length = 0;
+    return;
+  }
+  if (ack == null || hist.length < 2 || ack < hist[0].t) return;
+  let j = hist.length - 1;
+  while (j > 0 && hist[j - 1].t > ack) j--;
+  let p = hist[j];
+  if (j > 0 && ack < hist[j].t) {
+    const a = hist[j - 1], f = (ack - a.t) / (hist[j].t - a.t);
+    p = { x: a.x + (hist[j].x - a.x) * f, y: a.y + (hist[j].y - a.y) * f, z: a.z + (hist[j].z - a.z) * f };
+  }
+  const ex = e.x - p.x, ey = e.y - p.y, ez = e.z - p.z;
+  N.err = Math.hypot(ex, ez);                                  // exposed for diagnostics
+  if (Math.hypot(ex, ez) > 3 || Math.abs(ey) > 2.2) {          // way off (shoved, teleported): trust the server
+    Object.assign(player, { x: e.x, y: e.y, z: e.z, vx: e.vx, vy: e.vy, vz: e.vz });
+    hist.length = 0;
+    return;
+  }
+  const k = 0.3, cx = ex * k, cz = ez * k, cy = Math.abs(ey) > 0.4 ? ey * k : 0;
+  player.x += cx; player.y += cy; player.z += cz;
+  for (const h of hist) { h.x += cx; h.y += cy; h.z += cz; }   // keep history consistent with the correction
+}
+
+// Everyone else: draw them slightly in the past, between the two snapshots around that moment.
+function applyRemote(now) {
+  if (!snapBuf.length) return;
+  const rt = now - INTERP_MS;
+  while (snapBuf.length > 2 && snapBuf[1].at <= rt) snapBuf.shift();
+  const a = snapBuf[0], b = snapBuf.length > 1 ? snapBuf[1] : null;
+  const f = b ? clamp((rt - a.at) / (b.at - a.at), 0, 1) : 0;
+  for (const ch of chars) {
+    if (ch === player) continue;
+    const ea = a.m.get(ch.id);
+    if (!ea) continue;
+    const eb = (b && b.m.get(ch.id)) || ea;
+    const jump = Math.hypot(eb.x - ea.x, eb.z - ea.z) > 6;      // respawn: don't slide across the course
+    const ff = jump ? (f < 0.5 ? 0 : 1) : f;
+    ch.x = ea.x + (eb.x - ea.x) * ff; ch.y = ea.y + (eb.y - ea.y) * ff; ch.z = ea.z + (eb.z - ea.z) * ff;
+    let dh = eb.h - ea.h; while (dh > Math.PI) dh -= 2 * Math.PI; while (dh < -Math.PI) dh += 2 * Math.PI;
+    ch.heading = ea.h + dh * ff;
+    ch.vx = ea.vx; ch.vy = ea.vy; ch.vz = ea.vz;
+    ch.state = STATES[ea.st] || 'run';
+    ch.grounded = !!(ea.fl & 1); ch.finished = !!(ea.fl & 2); ch.invuln = ea.fl & 4 ? 1 : 0;
+    ch.placed = true;
+  }
+}
+
+function sendInput(now, ct) {
+  if (!player || !ws || ws.readyState !== 1) { inp.jump = inp.dive = false; return; }
+  const x = Math.round(player.wishX * 1000) / 1000, z = Math.round(player.wishZ * 1000) / 1000;
+  const changed = Math.abs(x - lastSent.x) > 0.01 || Math.abs(z - lastSent.z) > 0.01;
+  const since = now - lastSent.at;
+  if (inp.jump || inp.dive || (changed && since >= 25) || since >= 100) {
+    send({ t: 'in', ct: Math.round(ct * 10) / 10, x, z, j: inp.jump ? 1 : 0, d: inp.dive ? 1 : 0 });
+    lastSent = { x, z, at: now };
+    inp.jump = inp.dive = false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Input                                                               */
 /* ------------------------------------------------------------------ */
 const keys = new Set();
 let joy = { x: 0, y: 0 };
 let touchJump = false;
-const cam = { yaw: 0, pitch: 0.4, dist: 9.5, focus: new THREE.Vector3(0, 1, 15), pos: new THREE.Vector3(0, 6, 28), shake: 0, user: 0 };
+const cam = { yaw: 0, pitch: 0.4, dist: 9.5, focus: new THREE.Vector3(0, 1, 15), pos: new THREE.Vector3(0, 6, 28), shake: 0, user: 0, lastId: null };
 const typing = (e) => e.target instanceof HTMLInputElement;
 
 window.addEventListener('keydown', (e) => {
-  if (typing(e)) { if (e.code === 'Enter' && G.phase === 'menu') playNow(); return; }
+  if (typing(e)) return;
   keys.add(e.code);
   if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
   if (e.repeat) return;
-  if (e.code === 'Space') player.jumpReq = true;
-  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyF') player.diveReq = true;
+  if (e.code === 'Space') inp.jump = true;
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyF') inp.dive = true;
   if (e.code === 'KeyM') { muted = !muted; toast(muted ? 'Sound off' : 'Sound on'); audioInit(); }
-  if (e.code === 'KeyR' && G.phase !== 'menu') startRace();
-  if (e.code === 'Enter' && G.phase === 'results') { e.preventDefault(); startRace(); }
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 window.addEventListener('blur', () => keys.clear());
@@ -508,13 +724,14 @@ const isTouch = window.matchMedia('(pointer: coarse)').matches;
   const up = (e) => { if (e.pointerId !== jid) return; jid = null; joy = { x: 0, y: 0 }; knob.style.transform = ''; };
   joyEl.addEventListener('pointerup', up); joyEl.addEventListener('pointercancel', up);
   const jb = $('btnJump'), db = $('btnDive');
-  jb.addEventListener('pointerdown', (e) => { e.preventDefault(); touchJump = true; player.jumpReq = true; });
+  jb.addEventListener('pointerdown', (e) => { e.preventDefault(); touchJump = true; inp.jump = true; });
   const jUp = () => { touchJump = false; };
   jb.addEventListener('pointerup', jUp); jb.addEventListener('pointercancel', jUp); jb.addEventListener('pointerleave', jUp);
-  db.addEventListener('pointerdown', (e) => { e.preventDefault(); player.diveReq = true; });
+  db.addEventListener('pointerdown', (e) => { e.preventDefault(); inp.dive = true; });
 }
 
 function readInput() {
+  if (!player) { inp.jump = inp.dive = false; return; }
   const k = (c) => keys.has(c);
   let ix = (k('KeyD') || k('ArrowRight') ? 1 : 0) - (k('KeyA') || k('ArrowLeft') ? 1 : 0);
   let iy = (k('KeyW') || k('ArrowUp') ? 1 : 0) - (k('KeyS') || k('ArrowDown') ? 1 : 0);
@@ -524,7 +741,9 @@ function readInput() {
   // camera forward = (-sin, -cos), right = (cos, -sin)
   player.wishX = -s * iy + c * ix;
   player.wishZ = -c * iy - s * ix;
-  if ((k('Space') || touchJump) && player.grounded) player.jumpReq = true;   // hold to bunny-hop
+  if ((k('Space') || touchJump) && player.grounded) inp.jump = true;   // hold to bunny-hop
+  if (inp.jump) player.jumpReq = true;
+  if (inp.dive) player.diveReq = true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -532,10 +751,9 @@ function readInput() {
 /* ------------------------------------------------------------------ */
 const hud = {
   root: $('hud'), pos: $('posNum'), timer: $('timer'), qual: $('qualNum'), toast: $('toast'),
-  banner: $('banner'), flash: $('flash'), track: $('track'), hint: $('hint'),
+  banner: $('banner'), flash: $('flash'), track: $('track'), hint: $('hint'), spec: $('spec'),
 };
 $('posTotal').textContent = TOTAL; $('qualMax').textContent = S.QUALIFY;
-const dots = new Map();
 let toastT = 0;
 function toast(msg, ms = 1600) {
   hud.toast.textContent = msg; hud.toast.classList.add('show');
@@ -549,147 +767,176 @@ function banner(text, cls = '') {
 }
 function flash() { hud.flash.classList.remove('on'); void hud.flash.offsetWidth; hud.flash.classList.add('on'); }
 
-/* ------------------------------------------------------------------ */
-/* Game flow                                                           */
-/* ------------------------------------------------------------------ */
-const G = { phase: 'menu', now: 0, t: 0, shownN: 0, resultsAt: 0, pFin: false, overHandled: false, hintT: 0 };
-
-function layoutGrid() {
-  S.resetWorld(world);
-  const slots = [];
-  for (let row = 0; row < 3; row++) for (let col = 0; col < 4; col++) slots.push([-9 + col * 6 + (row % 2 ? 1.5 : -0.5), 15.6 + row * 2.9]);
-  slots.sort(() => Math.random() - 0.5);
-  chars.forEach((ch, i) => {
-    S.resetChar(ch, slots[i][0], slots[i][1]);
-    if (!ch.isPlayer) S.initBot(ch);
-    const v = vis.get(ch.id);
-    v.squash = 0;
-    v.group.position.set(ch.x, ch.y, ch.z);
-  });
-  player.maxSpeed = S.RUN;
-  G.pFin = false; G.overHandled = false; G.resultsAt = 0;
-  if (confetti) { scene.remove(confetti.pts); confetti = null; }
-}
-
-function startRace() {
-  audioInit();
-  layoutGrid();
-  $('menu').hidden = true; $('results').hidden = true; hud.root.hidden = false;
-  $('touch').hidden = !isTouch;
-  hud.hint.classList.remove('fade'); G.hintT = 0;
-  hud.banner.className = 'banner';
-  G.phase = 'countdown'; G.t = 0; G.shownN = 0;
-  cam.yaw = 0; cam.pitch = 0.4; cam.user = 0;
-  cam.focus.set(player.x, player.y + 1.1, player.z);
-}
-
-function goMenu() {
-  layoutGrid();
-  G.phase = 'menu';
-  $('menu').hidden = false; $('results').hidden = true; hud.root.hidden = true; $('touch').hidden = true;
-}
-
-function showResults() {
-  G.phase = 'results';
+function updateHud(now) {
   const ranked = S.rankings(chars);
-  const myRank = ranked.indexOf(player) + 1;
-  const made = player.finished;
-  const title = $('resTitle');
-  title.textContent = made ? 'QUALIFIED!' : 'ELIMINATED';
-  title.classList.toggle('out', !made);
-  $('resSub').textContent = made
-    ? `You finished ${ord(player.finishOrder + 1)} of ${TOTAL} in ${player.finishT.toFixed(2)}s${player.falls ? ` · ${player.falls} fall${player.falls > 1 ? 's' : ''}` : ' · flawless run!'}`
-    : `Only ${S.QUALIFY} beans can make the cut. You were ${ord(myRank)} on the course.`;
-  const list = $('resList'); list.textContent = '';
-  ranked.forEach((ch, i) => {
-    const li = document.createElement('li');
-    if (ch === player) li.className = 'me';
-    if (!ch.finished) li.classList.add('out');
-    const n = document.createElement('span'); n.textContent = i + 1;
-    const d = document.createElement('span'); d.className = 'dot'; d.style.background = ch.color;
-    const nm = document.createElement('span'); nm.textContent = ch.name;
-    const t = document.createElement('span'); t.className = 't';
-    t.textContent = ch.finished ? `${ch.finishT.toFixed(2)}s` : 'DNF';
-    li.append(n, d, nm, t);
-    list.append(li);
-  });
-  $('results').hidden = false;
-  $('touch').hidden = true;
-  (made ? sfx.win : sfx.lose)();
-  setTimeout(() => $('againBtn').focus({ preventScroll: true }), 50);
-}
-
-world.onEvent = (type, ch, data) => {
-  const v = vis.get(ch.id);
-  if (type === 'land' && v) v.squash = Math.min(0.5, data / 35);
-  if (!ch.isPlayer) return;
-  switch (type) {
-    case 'jump': sfx.jump(); break;
-    case 'land': sfx.land(); break;
-    case 'dive': sfx.dive(); break;
-    case 'bonk': sfx.bonk(); cam.shake = 0.5; toast('Bonk!', 900); break;
-    case 'fall': sfx.fall(); break;
-    case 'respawn': flash(); toast('Oops! Back to the checkpoint', 1500); break;
-    case 'finish':
-      G.pFin = true; G.resultsAt = G.now + 3.6;
-      banner('QUALIFIED!', 'small stay'); sfx.win(); burstConfetti({ x: ch.x, y: ch.y, z: ch.z });
-      break;
-  }
-};
-
-function updateFlow(dt) {
-  G.now += dt;
-  if (G.phase === 'countdown') {
-    G.t += dt;
-    const n = 3 - Math.floor(G.t);
-    if (G.t < 3 && n !== G.shownN) { G.shownN = n; banner(String(n)); sfx.count(); }
-    if (G.t >= 3) {
-      world.racing = true; world.gate.active = false;
-      banner('GO!', 'go'); sfx.go();
-      G.phase = 'racing';
-    }
-  } else if (G.phase === 'racing') {
-    G.hintT += dt;
-    if (G.hintT > 9) hud.hint.classList.add('fade');
-    if (world.raceT > TIME_LIMIT && !world.raceOver) world.raceOver = true;
-    if (world.raceOver && !G.overHandled) {
-      G.overHandled = true;
-      world.racing = false;
-      if (!player.finished) {
-        banner(world.finishers.length >= S.QUALIFY ? 'ELIMINATED' : 'TIME’S UP', 'bad small stay');
-        sfx.lose(); G.resultsAt = G.now + 2.4;
-      } else G.resultsAt = Math.min(G.resultsAt, G.now + 1.4);
-    }
-    if (G.resultsAt && G.now >= G.resultsAt) showResults();
-  }
-}
-
-function updateHud() {
-  const ranked = S.rankings(chars);
-  hud.pos.textContent = ranked.indexOf(player) + 1;
-  hud.timer.textContent = world.raceT.toFixed(2);
-  hud.qual.textContent = world.finishers.length;
+  hud.pos.textContent = player ? ranked.indexOf(player) + 1 : '–';
+  const rt = N.phase === 2 && !N.over ? N.rt + (now - N.rtAt) / 1000 : N.rt;
+  hud.timer.textContent = Math.max(0, rt).toFixed(2);
+  hud.qual.textContent = N.fin;
+  hud.spec.hidden = !!player;
   for (const ch of chars) {
     let d = dots.get(ch.id);
     if (!d) {
       d = document.createElement('div');
-      d.className = 'track-dot' + (ch.isPlayer ? ' me' : '');
+      d.className = 'track-dot' + (ch === player ? ' me' : '');
       d.style.background = ch.color;
       hud.track.append(d); dots.set(ch.id, d);
     }
-    d.style.background = ch.color;
     d.style.left = `${clamp((S.START_Z - ch.z) / S.COURSE_LEN, 0, 1) * 100}%`;
   }
 }
 
 /* ------------------------------------------------------------------ */
+/* Lobby, results, menu                                                */
+/* ------------------------------------------------------------------ */
+function renderLobby(list) {
+  $('roomCode').textContent = N.code;
+  const ul = $('lobbyList'); ul.textContent = '';
+  for (const c of list) {
+    if (!c.h) continue;
+    const li = document.createElement('li');
+    const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = c.c;
+    const nm = document.createElement('span'); nm.textContent = c.n;
+    li.append(dot, nm);
+    if (player && c.i === player.id) li.className = 'me';
+    ul.append(li);
+  }
+  $('startBtn').hidden = N.pub || !N.host;
+  updateLobbyStatus();
+}
+function updateLobbyStatus() {
+  let s;
+  if (N.pub) s = N.pt >= 0 ? `Race starts in ${Math.ceil(N.pt)}s` : 'Waiting for players…';
+  else s = N.host ? 'Share the code, then start when everyone is in.' : 'Waiting for the host to start…';
+  $('lobbyStatus').textContent = s;
+}
+
+function showResults(m) {
+  const meIdx = player ? m.list.findIndex((x) => x.i === player.id) : -1;
+  const me = meIdx >= 0 ? m.list[meIdx] : null;
+  const made = !!(me && me.f);
+  const title = $('resTitle');
+  title.textContent = !me ? 'ROUND OVER' : made ? 'QUALIFIED!' : 'ELIMINATED';
+  title.classList.toggle('out', !!me && !made);
+  $('resSub').textContent = !me ? 'Thanks for watching — you race next round.'
+    : made
+      ? `You finished ${ord(m.list.filter((x) => x.f).findIndex((x) => x.i === me.i) + 1)} of ${TOTAL} in ${me.ft.toFixed(2)}s${me.fl ? ` · ${me.fl} fall${me.fl > 1 ? 's' : ''}` : ' · flawless run!'}`
+      : `Only ${S.QUALIFY} beans can make the cut. You were ${ord(meIdx + 1)} on the course.`;
+  const list = $('resList'); list.textContent = '';
+  m.list.forEach((x, i) => {
+    const li = document.createElement('li');
+    if (me && x.i === me.i) li.className = 'me';
+    if (!x.f) li.classList.add('out');
+    const n = document.createElement('span'); n.textContent = i + 1;
+    const d = document.createElement('span'); d.className = 'dot'; d.style.background = x.c;
+    const nm = document.createElement('span'); nm.textContent = x.n + (x.h ? '' : ' · bot');
+    const t = document.createElement('span'); t.className = 't';
+    t.textContent = x.f ? `${x.ft.toFixed(2)}s` : 'DNF';
+    li.append(n, d, nm, t);
+    list.append(li);
+  });
+  $('results').hidden = false;
+  $('touch').hidden = true;
+}
+
+function menuError(msg) {
+  const el = $('menuErr');
+  el.textContent = msg; el.hidden = false;
+  $('menu').hidden = false;
+  setMenuBusy(false);
+}
+function setMenuBusy(busy) {
+  for (const id of ['playBtn', 'soloBtn', 'createBtn', 'joinBtn']) $(id).disabled = busy;
+}
+
+function toMenu() {
+  for (const ch of [...chars]) removeChar(ch);
+  player = null; G.inRoom = false; N.phase = -1; N.synced = false; N.over = false; N.fin = 0;
+  snapBuf.length = 0; hist.length = 0; needSnap = false; cam.lastId = null; tOff = 0;
+  world.racing = false; world.lobby = false; world.gate.active = true;
+  resetLocalWorld();
+  $('menu').hidden = false; $('results').hidden = true; $('lobby').hidden = true; $('touch').hidden = true;
+  hud.root.hidden = true; hud.banner.className = 'banner';
+  setMenuBusy(false);
+}
+
+async function joinRoom(mode, code) {
+  audioInit();
+  $('menuErr').hidden = true;
+  setMenuBusy(true);
+  try { await connect(); } catch {
+    menuError('Couldn’t reach the game server. Check your connection and try again.');
+    return;
+  }
+  send({ t: 'join', mode, code, name: cleanName(), color: chosenColor });
+  setTimeout(() => { if (!G.inRoom) setMenuBusy(false); }, 1500);
+}
+
+/* ---------- phases ---------- */
+function setPhase(m, at) {
+  const ph = m.ph;
+  N.pt = m.pt; N.rt = m.rt; N.rtAt = at;
+  if (ph !== N.phase) { const prev = N.phase; N.phase = ph; enterPhase(ph, prev); }
+  if (ph === 1) {
+    const n = Math.ceil(m.pt);
+    if (n > 0 && n !== G.shownN) { G.shownN = n; banner(String(n)); sfx.count(); }
+  }
+  if (m.ov && !N.over) {
+    N.over = true;
+    if (player && !player.finished) {
+      banner(N.fin >= S.QUALIFY ? 'ELIMINATED' : 'TIME’S UP', 'bad small stay'); sfx.lose();
+    }
+  } else if (!m.ov) N.over = false;
+  world.racing = ph === 2 && !m.ov;
+  world.lobby = ph === 0;
+  world.gate.active = ph < 2;
+  if (ph === 0) updateLobbyStatus();
+  if (ph === 3) $('resNext').textContent = `Back to the lobby in ${Math.max(0, Math.ceil(m.pt))}s`;
+}
+
+function enterPhase(ph, prev) {
+  if (ph === 0 || ph === 1) {
+    resetLocalWorld();
+    cam.lastId = null; cam.yaw = 0; cam.pitch = 0.4; cam.user = 0;
+    if (confetti) { scene.remove(confetti.pts); confetti.pts.geometry.dispose(); confetti = null; }
+    hud.banner.className = 'banner';
+  }
+  $('lobby').hidden = ph !== 0;
+  if (ph !== 3) $('results').hidden = true;
+  hud.root.hidden = ph === 0;
+  $('touch').hidden = !isTouch || ph === 3;
+  if (ph === 0) renderLobby(chars.filter((c) => c.human).map((c) => ({ i: c.id, n: c.name, c: c.color, h: 1 })));
+  if (ph === 1) { G.shownN = 0; G.hintT = 0; hud.hint.classList.remove('fade'); }
+  if (ph === 2 && prev === 1) { banner('GO!', 'go'); sfx.go(); }
+}
+
+// Local events from my own predicted bean (sounds and feedback)
+world.onEvent = (type, ch, data) => {
+  const v = vis.get(ch.id);
+  if (type === 'land' && v) v.squash = Math.min(0.5, data / 35);
+  if (ch !== player) return;
+  switch (type) {
+    case 'jump': sfx.jump(); break;
+    case 'land': sfx.land(); break;
+    case 'dive': sfx.dive(); break;
+    case 'bonk': sfx.bonk(); cam.shake = 0.5; toast('Bonk!', 900); break;
+    default: break;
+  }
+};
+
+/* ------------------------------------------------------------------ */
 /* Camera + per-frame visuals                                          */
 /* ------------------------------------------------------------------ */
 const tmp = new THREE.Vector3();
+function camTarget() {
+  if (player) return player.placed ? player : null;
+  const placed = chars.filter((c) => c.placed);
+  return placed.length ? S.rankings(placed)[0] : null;      // spectators follow the leader
+}
 function updateCamera(dt, time) {
-  const look = new THREE.Vector3();
-  if (G.phase === 'menu') {
-    // Slow orbit around the starting grid so the lineup shows behind the menu.
+  const target = G.inRoom ? camTarget() : null;
+  if (!target) {
+    // Slow orbit around the starting grid behind the menu.
     const a = time * 0.22;
     tmp.set(Math.sin(a) * 16, 5.5, 18 + Math.cos(a) * 14);
     cam.pos.lerp(tmp, 1 - Math.exp(-4 * dt));
@@ -697,22 +944,24 @@ function updateCamera(dt, time) {
     camera.lookAt(0, 1.4, 18);
     return;
   }
-  // Follow the player; drift around them once they have finished.
-  if (player.finished && cam.user <= 0) cam.yaw += dt * 0.35;
+  const f = cam.focus;
+  const fresh = cam.lastId == null;
+  if (fresh) f.set(target.x, target.y + 1.1, target.z);
+  cam.lastId = target.id;
+  if (target.finished && cam.user <= 0) cam.yaw += dt * 0.35;     // drift around the winner
   if (cam.user > 0) cam.user -= dt;
-  const f = cam.focus, k = 1 - Math.exp(-18 * dt), ky = 1 - Math.exp(-6 * dt);
-  f.x += (player.x - f.x) * k; f.z += (player.z - f.z) * k; f.y += (player.y + 1.1 - f.y) * ky;
-  const cp = Math.cos(cam.pitch), dist = cam.dist + (G.phase === 'countdown' ? (3 - G.t) * 1.4 : 0);
+  const k = 1 - Math.exp(-18 * dt), ky = 1 - Math.exp(-6 * dt);
+  f.x += (target.x - f.x) * k; f.z += (target.z - f.z) * k; f.y += (target.y + 1.1 - f.y) * ky;
+  const cp = Math.cos(cam.pitch), dist = cam.dist + (N.phase === 1 ? clamp(N.pt, 0, 3) * 1.4 : 0);
   tmp.set(f.x + Math.sin(cam.yaw) * cp * dist, f.y + Math.sin(cam.pitch) * dist, f.z + Math.cos(cam.yaw) * cp * dist);
-  cam.pos.lerp(tmp, 1 - Math.exp(-14 * dt));
+  if (fresh) cam.pos.copy(tmp); else cam.pos.lerp(tmp, 1 - Math.exp(-14 * dt));
   camera.position.copy(cam.pos);
   if (cam.shake > 0) {
     cam.shake -= dt * 2.5;
     camera.position.x += (Math.random() - 0.5) * cam.shake * 0.4;
     camera.position.y += (Math.random() - 0.5) * cam.shake * 0.4;
   }
-  look.copy(f);
-  camera.lookAt(look);
+  camera.lookAt(f);
 }
 
 function updateVisuals(dt, time) {
@@ -726,11 +975,15 @@ function updateVisuals(dt, time) {
       if (shaking) mesh.position.x += Math.sin(time * 90 + c.id) * 0.07;
       mesh.material.emissive.set(shaking ? '#ff3b1f' : '#000000');
       mesh.material.emissiveIntensity = shaking ? 0.55 : 0;
-      const p = c.pop === undefined ? 1 : c.pop;
-      mesh.scale.setScalar(Math.max(0.01, p));
+      if (c.pop !== undefined && c.pop < 1) c.pop = Math.min(1, c.pop + dt * 3);
+      mesh.scale.setScalar(Math.max(0.01, c.pop === undefined ? 1 : c.pop));
     }
   }
-  for (const ch of chars) animateBean(ch, vis.get(ch.id), dt, time);
+  for (const ch of chars) {
+    const v = vis.get(ch.id);
+    animateBean(ch, v, dt, time);
+    if (!ch.placed) v.group.visible = false;
+  }
   for (const m of floaters) m.position.y = m.userData.base + Math.sin(time * m.userData.sp + m.userData.ph) * 1.4;
   crown.rotation.y = time * 1.6;
   crown.position.y = 4.5 + 2.4 + Math.sin(time * 2) * 0.18;
@@ -742,30 +995,39 @@ function updateVisuals(dt, time) {
 /* ------------------------------------------------------------------ */
 /* Main loop                                                           */
 /* ------------------------------------------------------------------ */
-let acc = 0, lastT = performance.now(), gooT = 0;
+let acc = 0, lastT = performance.now(), gooT = 0, frameCount = 0;
 function frame(nowMs) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.1, (nowMs - lastT) / 1000);
   lastT = nowMs;
   const time = nowMs / 1000;
+  G.now += dt;
 
-  if (G.phase !== 'menu') {
-    readInput();
-    updateFlow(dt);
-  } else { player.wishX = player.wishZ = 0; player.jumpReq = player.diveReq = false; }
+  readInput();
+  sendInput(nowMs, simMs);
 
+  // Predict my own bean with the same physics the server runs; the world (platforms, bars) follows server time.
   acc += dt;
-  while (acc >= S.STEP) { S.stepWorld(world, chars, S.STEP); acc -= S.STEP; }
+  while (acc >= S.STEP) {
+    simMs += S.STEP * 1000;
+    world.t = simMs / 1000 + tOff - S.STEP;
+    S.stepWorld(world, player ? [player] : [], S.STEP);
+    if (player) hist.push({ t: simMs, x: player.x, y: player.y, z: player.z });
+    acc -= S.STEP;
+  }
+  const cut = hist.findIndex((h) => h.t >= simMs - 2500);
+  if (cut > 0) hist.splice(0, cut);
 
+  applyRemote(nowMs);
+  if (G.inRoom && N.phase === 2) { G.hintT += dt; if (G.hintT > 9) hud.hint.classList.add('fade'); }
   updateConfetti(dt);
   updateVisuals(dt, time);
   updateCamera(dt, time);
-  if (!hud.root.hidden) updateHud();
+  if (!hud.root.hidden) updateHud(nowMs);
   gooT += dt;
   if ((frameCount++ & 1) === 0) animateGoo(gooT);
   renderer.render(scene, camera);
 }
-let frameCount = 0;
 
 /* ------------------------------------------------------------------ */
 /* Boot                                                                */
@@ -780,28 +1042,43 @@ COLORS.forEach((col) => {
   b.addEventListener('click', () => {
     chosenColor = col;
     swatchBox.querySelectorAll('.swatch').forEach((s) => s.setAttribute('aria-checked', String(s === b)));
-    vis.get(player.id).mat.color.set(col);
-    player.color = col;
   });
   swatchBox.append(b);
 });
 
 const cleanName = () => ($('nameInput').value.trim() || 'Player').slice(0, 14);
-function playNow() {
-  setPlayerLook(cleanName(), chosenColor);
-  startRace();
-}
+const cleanCode = () => $('codeInput').value.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 4);
 
 async function boot() {
   // Let the web font load so the name tags render in it (don't wait forever).
   await Promise.race([document.fonts ? document.fonts.ready : Promise.resolve(), new Promise((r) => setTimeout(r, 1200))]);
-  populate(cleanName(), chosenColor);
-  layoutGrid();
-  $('playBtn').addEventListener('click', playNow);
-  $('againBtn').addEventListener('click', startRace);
-  $('menuBtn').addEventListener('click', goMenu);
+  resetLocalWorld();
+  $('playBtn').addEventListener('click', () => joinRoom('public'));
+  $('soloBtn').addEventListener('click', () => joinRoom('solo'));
+  $('createBtn').addEventListener('click', () => joinRoom('create'));
+  $('joinForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const code = cleanCode();
+    if (code.length !== 4) { menuError('Room codes are 4 characters.'); return; }
+    joinRoom('code', code);
+  });
+  $('nameInput').addEventListener('keydown', (e) => { if (e.code === 'Enter') joinRoom('public'); });
+  $('startBtn').addEventListener('click', () => send({ t: 'start' }));
+  $('leaveBtn').addEventListener('click', () => { send({ t: 'leave' }); toMenu(); });
+  $('lobbyLeave').addEventListener('click', () => { send({ t: 'leave' }); toMenu(); });
+  $('copyBtn').addEventListener('click', async () => {
+    const link = `${location.origin}${location.pathname}?room=${N.code}`;
+    try { await navigator.clipboard.writeText(link); toast('Invite link copied', 1400); }
+    catch { toast(`Room code: ${N.code}`, 2500); }
+  });
+  const invited = new URLSearchParams(location.search).get('room');
+  if (invited) {
+    $('codeInput').value = invited.toUpperCase().slice(0, 4);
+    $('menuErr').textContent = `You’re invited to room ${$('codeInput').value}. Press Join to enter.`;
+    $('menuErr').hidden = false;
+  }
   window.__fallBeansReady = true;
-  window.__fb = { world, chars, G, cam };   // debugging handle
+  window.__fb = { world, chars, N, G, cam, hist, get player() { return player; }, get simMs() { return simMs; } };   // debugging handle
   $('loading').classList.add('done');
   setTimeout(() => ($('loading').hidden = true), 600);
   requestAnimationFrame(frame);

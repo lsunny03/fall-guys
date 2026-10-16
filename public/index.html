@@ -25,11 +25,12 @@
     <div class="hud-timer"><span id="timer">0.00</span></div>
     <div class="hud-qual">QUALIFIED <b id="qualNum">0</b>/<span id="qualMax">8</span></div>
     <div id="toast" class="toast" role="status"></div>
+    <div id="spec" class="spec" hidden>SPECTATING · you join the next round</div>
     <div id="banner" class="banner" role="status"></div>
     <div id="flash" class="flash"></div>
     <div class="track" id="track" aria-hidden="true"><div class="track-line"></div></div>
     <div class="hint" id="hint">
-      <kbd>WASD</kbd> move · <kbd>Space</kbd> jump · <kbd>Shift</kbd> dive · drag or <kbd>Q</kbd><kbd>E</kbd> camera · <kbd>R</kbd> restart · <kbd>M</kbd> mute
+      <kbd>WASD</kbd> move · <kbd>Space</kbd> jump · <kbd>Shift</kbd> dive · drag to turn the camera · <kbd>M</kbd> mute
     </div>
   </div>
 
@@ -53,13 +54,38 @@
         <span>Pick a color</span>
         <div id="swatches" class="swatches" role="radiogroup" aria-label="Bean color"></div>
       </div>
-      <button id="playBtn" class="big-btn" type="button">PLAY</button>
+      <button id="playBtn" class="big-btn" type="button">PLAY ONLINE</button>
+      <div class="btn-row two">
+        <button id="soloBtn" class="ghost-btn" type="button">Solo vs bots</button>
+        <button id="createBtn" class="ghost-btn" type="button">Private room</button>
+      </div>
+      <form id="joinForm" class="join-row" autocomplete="off">
+        <input id="codeInput" type="text" maxlength="4" placeholder="ROOM CODE" aria-label="Room code" spellcheck="false" autocapitalize="characters">
+        <button id="joinBtn" class="ghost-btn" type="submit">Join</button>
+      </form>
+      <p id="menuErr" class="menu-err" role="alert" hidden></p>
       <ul class="controls">
         <li><kbd>WASD</kbd>/<kbd>Arrows</kbd> run</li>
         <li><kbd>Space</kbd> jump</li>
         <li><kbd>Shift</kbd>/<kbd>F</kbd> dive</li>
-        <li>drag / <kbd>Q</kbd><kbd>E</kbd> camera</li>
+        <li>drag the mouse to turn the camera</li>
       </ul>
+    </div>
+  </div>
+
+  <!-- Lobby (shown over the live start pad so you can warm up) -->
+  <div id="lobby" class="lobby" hidden>
+    <div class="lobby-card">
+      <div class="lobby-top">
+        <div class="room-chip">ROOM <b id="roomCode">----</b>
+          <button id="copyBtn" class="chip-btn" type="button">Copy invite link</button>
+        </div>
+        <button id="lobbyLeave" class="ghost-btn small" type="button">Leave</button>
+      </div>
+      <ul id="lobbyList" class="lobby-list" aria-label="Players in this room"></ul>
+      <p id="lobbyStatus" class="lobby-status" role="status"></p>
+      <button id="startBtn" class="big-btn compact" type="button" hidden>START RACE</button>
+      <p class="lobby-note">Empty spots are filled with bots · warm up with <kbd>WASD</kbd> <kbd>Space</kbd> <kbd>Shift</kbd></p>
     </div>
   </div>
 
@@ -69,9 +95,9 @@
       <h2 id="resTitle">QUALIFIED!</h2>
       <p id="resSub" class="tag"></p>
       <ol id="resList" class="res-list"></ol>
+      <p id="resNext" class="tag next"></p>
       <div class="btn-row">
-        <button id="againBtn" class="big-btn" type="button">RACE AGAIN</button>
-        <button id="menuBtn" class="ghost-btn" type="button">Change bean</button>
+        <button id="leaveBtn" class="ghost-btn" type="button">Leave room</button>
       </div>
     </div>
   </div>

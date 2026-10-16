@@ -42,7 +42,7 @@ const emit = (w, type, ch, data) => w.onEvent && w.onEvent(type, ch, data);
 // Every solid thing is a yaw-rotatable box ("collider"). Course runs toward -Z.
 export function createWorld() {
   const w = {
-    t: 0, raceT: 0, racing: false, raceOver: false, finishers: [],
+    t: 0, raceT: 0, racing: false, lobby: false, mirror: false, raceOver: false, finishers: [],
     colliders: [], movers: [], tiles: [], checkpoints: [], gate: null,
     onEvent: null,
   };
@@ -145,6 +145,14 @@ export function createWorld() {
 
 function tileUpdate(c, w, dt) {
   c.dx = c.dy = c.dz = 0;
+  if (w.mirror) {                        // client copy: the server owns tile states
+    if (c.state === 'fall') {
+      c.fv -= 22 * dt;
+      const ny = c.cy + c.fv * dt;
+      c.dy = ny - c.cy; c.cy = ny;
+    }
+    return;
+  }
   if (c.state === 'shake') {
     c.timer -= dt;
     if (c.timer <= 0) { c.state = 'fall'; c.fv = 0; }
@@ -242,7 +250,7 @@ function collide(w, ch, c, dt) {
     if (ch.vy < 0) { ch.landV = Math.max(ch.landV, -ch.vy); ch.vy = 0; }
     ch.y = top; ch.grounded = true; ch.ground = c;
     if (c.cp !== undefined && c.cp > ch.cp) ch.cp = c.cp;
-    if (c.kind === 'tile' && c.state === 'idle') { c.state = 'shake'; c.timer = 1.0; }
+    if (c.kind === 'tile' && c.state === 'idle' && !w.mirror) { c.state = 'shake'; c.timer = 1.0; }
     return;
   }
 
@@ -281,7 +289,7 @@ export function stepChar(w, ch, dt) {
   ch.stateT -= dt;
   if ((ch.state === 'dive' || ch.state === 'stun') && ch.stateT <= 0) ch.state = 'run';
 
-  const canControl = ch.state === 'run' && w.racing && !ch.finished;
+  const canControl = ch.state === 'run' && (w.racing || w.lobby) && !ch.finished;
   let wx = ch.wishX, wz = ch.wishZ;
   let wl = Math.hypot(wx, wz);
   if (wl > 1) { wx /= wl; wz /= wl; wl = 1; }
@@ -371,6 +379,7 @@ export function stepWorld(w, chars, dt) {
     stepChar(w, ch, dt);
   }
   charVsChar(w, chars);
+  if (w.mirror) return;                  // client copy: the server decides falls and finishes
 
   for (const ch of chars) {
     if (ch.y < FALL_Y && !ch.finished) { emit(w, 'fall', ch); respawn(w, ch); continue; }
