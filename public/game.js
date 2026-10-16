@@ -374,6 +374,9 @@ function animateBean(ch, v, dt, time) {
     wz = Math.sin(v.phase) * 0.26 * run + Math.sin(time * 2.4 + ch.id) * 0.07;
     wj = Math.sin(v.phase * 2) * 0.05 * run;
     lL = s * 0.95 * run; lR = -lL; aL = -s * 0.85 * run; aR = -aL;
+    // Arms also flap out to the sides and swing wider while running, scaled by speed.
+    aL *= 1.6; aR *= 1.6;
+    az = 0.12 + run * (0.7 + Math.sin(v.phase * 2 + ch.id) * 0.35);
     y += Math.sin(time * 2.2 + ch.id) * 0.012 + Math.abs(s) * 0.05 * run;
   }
   const r = v.rig;
