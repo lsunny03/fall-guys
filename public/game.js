@@ -343,9 +343,9 @@ const lerpTo = (cur, target, k) => cur + (target - cur) * k;
 function animateBean(ch, v, dt, time) {
   const sp = Math.hypot(ch.vx, ch.vz);
   const run = ch.grounded ? Math.min(1, sp / 7) : 0;
-  v.phase += sp * dt * 1.5;
+  v.phase += sp * dt * 1.1;   // slower stride
   v.squash = Math.max(0, v.squash - dt * 3.2);
-  const k = 1 - Math.exp(-20 * dt);
+  const k = 1 - Math.exp(-13 * dt);   // looser follow = jelly lag
 
   let rx = 0, y = 0.7, rz = 0, aL = 0, aR = 0, az = 0.12, lL = 0, lR = 0;
   if (ch.state === 'dive') {
@@ -358,9 +358,12 @@ function animateBean(ch, v, dt, time) {
     lL = Math.sin(time * 14) * 0.5; lR = -lL;
   } else if (!ch.grounded) {
     rx = 0.12; az = 2.1; lL = 0.55; lR = -0.35;
+    rz = Math.sin(time * 8 + ch.id) * 0.14;
   } else {
-    rx = 0.15 * run;
     const s = Math.sin(v.phase);
+    // Wobble: side-to-side waddle and a fore/aft bob, plus a slow idle sway.
+    rx = 0.15 * run + Math.sin(v.phase * 2 + 1) * 0.07 * run;
+    rz = Math.sin(v.phase) * 0.2 * run + Math.sin(time * 2.4 + ch.id) * 0.05;
     lL = s * 0.95 * run; lR = -lL; aL = -s * 0.85 * run; aR = -aL;
     y += Math.sin(time * 2.2 + ch.id) * 0.012 + Math.abs(s) * 0.05 * run;
   }
@@ -376,7 +379,8 @@ function animateBean(ch, v, dt, time) {
   v.legR.rotation.x = lerpTo(v.legR.rotation.x, lR, k);
 
   const stretch = clamp(ch.vy * 0.012, -0.08, 0.14) - v.squash * 0.4;
-  r.scale.set(1 - stretch * 0.5, 1 + stretch, 1 - stretch * 0.5);
+  const jig = Math.sin(v.phase * 2) * 0.04 * run;   // squishy jelly bounce while running
+  r.scale.set(1 - stretch * 0.5 + jig, 1 + stretch - jig, 1 - stretch * 0.5 + jig);
 
   v.group.position.set(ch.x, ch.y, ch.z);
   v.group.rotation.y = ch.heading + (ch.state === 'done' ? time * 4 : 0);
