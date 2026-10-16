@@ -361,6 +361,10 @@ function animateBean(ch, v, dt, time) {
   } else if (!ch.grounded) {
     rx = 0.12; az = 2.1; lL = 0.55; lR = -0.35;
     wz = Math.sin(time * 8 + ch.id) * 0.14;
+    // Arms flail overhead: they flap up and down together while swinging fore/aft out of step.
+    const w = time * 11 + ch.id;
+    az = 2.1 + Math.sin(w) * 0.55;
+    aL = Math.sin(w * 0.5) * 0.9; aR = -aL;
   } else {
     const s = Math.sin(v.phase);
     rx = 0.15 * run;
