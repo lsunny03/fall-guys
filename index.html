@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Fall Beans — Obstacle Course Royale</title>
+  <meta name="description" content="A jelly-bean obstacle course race. Jump, dive and shove your way to the crown.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+</head>
+<body>
+  <canvas id="c" aria-label="Game view"></canvas>
+
+  <!-- In-race HUD -->
+  <div id="hud" hidden>
+    <div class="hud-pos" aria-live="polite">
+      <span id="posNum">1</span><span class="of">/<span id="posTotal">12</span></span>
+      <small>POSITION</small>
+    </div>
+    <div class="hud-timer"><span id="timer">0.00</span></div>
+    <div class="hud-qual">QUALIFIED <b id="qualNum">0</b>/<span id="qualMax">8</span></div>
+    <div id="toast" class="toast" role="status"></div>
+    <div id="banner" class="banner" role="status"></div>
+    <div id="flash" class="flash"></div>
+    <div class="track" id="track" aria-hidden="true"><div class="track-line"></div></div>
+    <div class="hint" id="hint">
+      <kbd>WASD</kbd> move · <kbd>Space</kbd> jump · <kbd>Shift</kbd> dive · drag or <kbd>Q</kbd><kbd>E</kbd> camera · <kbd>R</kbd> restart · <kbd>M</kbd> mute
+    </div>
+  </div>
+
+  <!-- Touch controls -->
+  <div id="touch" hidden>
+    <div id="joy"><div id="knob"></div></div>
+    <button id="btnDive" type="button">DIVE</button>
+    <button id="btnJump" type="button">JUMP</button>
+  </div>
+
+  <!-- Title / menu -->
+  <div id="menu" class="overlay">
+    <div class="menu-card">
+      <h1 class="logo"><span>Fall</span> <span>Beans</span></h1>
+      <p class="tag">12 beans. 1 course. 8 make it to the crown.</p>
+      <label class="field">
+        <span>Your name</span>
+        <input id="nameInput" type="text" maxlength="14" value="Player" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="field">
+        <span>Pick a color</span>
+        <div id="swatches" class="swatches" role="radiogroup" aria-label="Bean color"></div>
+      </div>
+      <button id="playBtn" class="big-btn" type="button">PLAY</button>
+      <ul class="controls">
+        <li><kbd>WASD</kbd>/<kbd>Arrows</kbd> run</li>
+        <li><kbd>Space</kbd> jump</li>
+        <li><kbd>Shift</kbd>/<kbd>F</kbd> dive</li>
+        <li>drag / <kbd>Q</kbd><kbd>E</kbd> camera</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="results" class="overlay" hidden>
+    <div class="menu-card results-card">
+      <h2 id="resTitle">QUALIFIED!</h2>
+      <p id="resSub" class="tag"></p>
+      <ol id="resList" class="res-list"></ol>
+      <div class="btn-row">
+        <button id="againBtn" class="big-btn" type="button">RACE AGAIN</button>
+        <button id="menuBtn" class="ghost-btn" type="button">Change bean</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="loading" class="loading">Inflating beans…</div>
+  <div id="fatal" class="fatal" hidden>
+    <h2>Couldn't start the game</h2>
+    <p id="fatalMsg">The 3D engine failed to load. Check your connection and refresh.</p>
+  </div>
+  <noscript><div class="fatal"><h2>JavaScript is required</h2></div></noscript>
+
+  <script>
+    // If the module never signals ready (CDN blocked, no WebGL…) show a friendly message.
+    setTimeout(function () {
+      if (!window.__fallBeansReady) {
+        document.getElementById('loading').hidden = true;
+        document.getElementById('fatal').hidden = false;
+      }
+    }, 12000);
+  </script>
+  <script type="module" src="game.js"></script>
+</body>
+</html>
