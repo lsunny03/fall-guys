@@ -495,7 +495,7 @@ let tOff = 0;               // world time = simMs/1000 + tOff, kept in step with
 let needSnap = false;
 const hist = [];            // my recent predicted positions, to compare against the server's state
 const snapBuf = [];         // recent snapshots of the room, for interpolating other beans
-const INTERP_MS = 110;
+const INTERP_MS = 70;       // ~4 snapshots at the server's 60 Hz; also the collision lead in applyRemote
 const inp = { jump: false, dive: false };
 let lastSent = { x: 9, z: 9, at: 0 };
 

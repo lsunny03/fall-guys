@@ -12,7 +12,7 @@ const COUNTDOWN = 3;
 const TIME_LIMIT = 120;
 const OVER_DELAY = 2.2;      // freeze time between "race over" and the results screen
 const RESULTS_TIME = 10;
-const SNAP_HZ = 30;
+const SNAP_HZ = 60;          // matches the 60 Hz room loop below; clients draw others INTERP_MS behind these
 
 const COLORS = ['#ff4d6d', '#ff9f1c', '#ffd60a', '#7bd72b', '#2ec4b6', '#3a86ff', '#8338ec', '#ff5db1', '#00bbf9', '#fb5607'];
 const BOT_NAMES = ['Bean Machine', 'Jelly Roll', 'Waddles', 'Sir Bounce', 'Cap’n Wobble', 'Pudding', 'Noodle', 'Gizmo', 'Sprout', 'Biscuit', 'Pickles', 'Mochi', 'Zigzag', 'Tater Tot', 'Muffin'];
@@ -198,7 +198,8 @@ class Room {
     }
 
     this.snapAcc += dt;
-    if (this.snapAcc >= 1 / SNAP_HZ) { this.snapAcc %= 1 / SNAP_HZ; this.sendSnapshot(); }
+    // Timer ticks jitter around 1/60 s, so allow a little slack or an early tick would skip a snapshot.
+    if (this.snapAcc >= 1 / SNAP_HZ - 0.003) { this.snapAcc = Math.max(0, this.snapAcc - 1 / SNAP_HZ); this.sendSnapshot(); }
   }
 
   sendSnapshot() {
