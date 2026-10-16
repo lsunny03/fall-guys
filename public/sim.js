@@ -366,6 +366,26 @@ function charVsChar(w, chars) {
   }
 }
 
+// Client prediction: my bean vs. everyone else as the client sees them. Same push-apart and bounce
+// as charVsChar, but one-sided (the others are snapshots, overwritten every frame) and it never
+// stuns: the server decides bonks and tells me, so a local stun would only pre-empt that.
+export function collideWithOthers(me, others) {
+  if (me.ghost || me.invuln > 0) return;
+  const min = 2 * R;
+  for (const b of others) {
+    if (!b.placed || b.ghost || b.invuln > 0 || Math.abs(me.y - b.y) > 1.2) continue;
+    let dx = me.x - b.x, dz = me.z - b.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 >= min * min) continue;
+    const d = Math.sqrt(d2);
+    if (d < 1e-4) { dx = 1; dz = 0; } else { dx /= d; dz /= d; }
+    const pen = (min - d) / 2;                       // the server splits the push between the pair
+    me.x += dx * pen; me.z += dz * pen;
+    const rv = (me.vx - b.vx) * dx + (me.vz - b.vz) * dz;
+    if (rv < 0) { const j2 = (-(1 + 0.35) * rv) / 2; me.vx += dx * j2; me.vz += dz * j2; }
+  }
+}
+
 export function stepWorld(w, chars, dt) {
   w.t += dt;
   if (w.racing) w.raceT += dt;

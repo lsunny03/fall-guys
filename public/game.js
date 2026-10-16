@@ -1031,10 +1031,12 @@ function frame(nowMs) {
 
   // Predict my own bean with the same physics the server runs; the world (platforms, bars) follows server time.
   acc += dt;
+  const others = player ? chars.filter((c) => c !== player) : [];
   while (acc >= S.STEP) {
     simMs += S.STEP * 1000;
     world.t = simMs / 1000 + tOff - S.STEP;
     S.stepWorld(world, player ? [player] : [], S.STEP);
+    if (player) S.collideWithOthers(player, others);   // so I bump into beans instead of ghosting through
     if (player) hist.push({ t: simMs, x: player.x, y: player.y, z: player.z });
     acc -= S.STEP;
   }
