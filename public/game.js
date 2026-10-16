@@ -401,7 +401,13 @@ function animateBean(ch, v, dt, time) {
   // Squishy jelly bounce, scaled from the feet so it is also strongest up top.
   v.wob.scale.set(1 + wj, 1 - wj, 1 + wj);
 
-  v.group.position.set(ch.x, ch.y, ch.z);
+  if (ch.ox || ch.oy || ch.oz) {
+    const bumped = ch.bumpAt != null && simMs - ch.bumpAt < 300;
+    const d = Math.exp(-dt * (bumped ? 6 : 12));
+    ch.ox *= d; ch.oy *= d; ch.oz *= d;
+    if (Math.hypot(ch.ox, ch.oy, ch.oz) < 0.002) ch.ox = ch.oy = ch.oz = 0;
+  }
+  v.group.position.set(ch.x + (ch.ox || 0), ch.y + (ch.oy || 0), ch.z + (ch.oz || 0));
   v.group.rotation.y = ch.heading + (ch.state === 'done' ? time * 4 : 0);
   v.tag.position.y = 2.15;
   // Keep the (rotated) group's name tag readable: sprites ignore rotation, so nothing to do.
@@ -615,7 +621,17 @@ function onSnap(m) {
   }
 }
 
+// Hide a correction: physics moves at once, but the drawn bean starts where it was and glides over.
+// Right after a bump the glide is slower, since that is when server and client disagree most.
+function easeOut(dx, dy, dz) {
+  const P = player;
+  P.ox = (P.ox || 0) + dx; P.oy = (P.oy || 0) + dy; P.oz = (P.oz || 0) + dz;
+  const m = Math.hypot(P.ox, P.oy, P.oz);
+  if (m > 2) { const s = 2 / m; P.ox *= s; P.oy *= s; P.oz *= s; }   // never drag the drawing far from the truth
+}
+
 function adopt(e, kind) {
+  if (kind === 'b' && Math.hypot(e.x - player.x, e.z - player.z) < 2) easeOut(player.x - e.x, player.y - e.y, player.z - e.z);
   Object.assign(player, { x: e.x, y: e.y, z: e.z, vx: e.vx, vy: e.vy, vz: e.vz, ground: null, grounded: false });
   if (kind === 'r') { player.state = 'run'; player.stateT = 0; player.invuln = 1.6; player.heading = e.h; }
   else { player.state = 'stun'; player.stateT = 0.9; }
@@ -652,6 +668,7 @@ function reconcile(e, ack) {
   }
   const k = 0.3, cx = ex * k, cz = ez * k, cy = Math.abs(ey) > 0.4 ? ey * k : 0;
   player.x += cx; player.y += cy; player.z += cz;
+  easeOut(-cx, -cy, -cz);
   for (const h of hist) { h.x += cx; h.y += cy; h.z += cz; }   // keep history consistent with the correction
 }
 
@@ -673,6 +690,12 @@ function applyRemote(now) {
     let dh = eb.h - ea.h; while (dh > Math.PI) dh -= 2 * Math.PI; while (dh < -Math.PI) dh += 2 * Math.PI;
     ch.heading = ea.h + dh * ff;
     ch.vx = ea.vx; ch.vy = ea.vy; ch.vz = ea.vz;
+    // Collision-only lead: the drawn bean lags INTERP_MS behind the newest snapshot, but the server
+    // collides everyone at "now". Project along velocity, capped so a sudden turn can't throw it far.
+    let lx = jump ? 0 : ea.vx * (INTERP_MS / 1000), lz = jump ? 0 : ea.vz * (INTERP_MS / 1000);
+    const ll = Math.hypot(lx, lz);
+    if (ll > 1.2) { lx *= 1.2 / ll; lz *= 1.2 / ll; }
+    ch.px = ch.x + lx; ch.pz = ch.z + lz;
     ch.state = STATES[ea.st] || 'run';
     ch.grounded = !!(ea.fl & 1); ch.finished = !!(ea.fl & 2); ch.invuln = ea.fl & 4 ? 1 : 0;
     ch.placed = true;
@@ -1036,7 +1059,7 @@ function frame(nowMs) {
     simMs += S.STEP * 1000;
     world.t = simMs / 1000 + tOff - S.STEP;
     S.stepWorld(world, player ? [player] : [], S.STEP);
-    if (player) S.collideWithOthers(player, others);   // so I bump into beans instead of ghosting through
+    if (player && S.collideWithOthers(player, others)) player.bumpAt = simMs;   // bump into beans instead of ghosting through
     if (player) hist.push({ t: simMs, x: player.x, y: player.y, z: player.z });
     acc -= S.STEP;
   }

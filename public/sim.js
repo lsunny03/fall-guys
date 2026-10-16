@@ -369,12 +369,15 @@ function charVsChar(w, chars) {
 // Client prediction: my bean vs. everyone else as the client sees them. Same push-apart and bounce
 // as charVsChar, but one-sided (the others are snapshots, overwritten every frame) and it never
 // stuns: the server decides bonks and tells me, so a local stun would only pre-empt that.
+// Others are tested at b.px/b.pz when set: their drawn position is interpolated into the past, so
+// the client projects it forward to roughly where the server has them now. Returns true on contact.
 export function collideWithOthers(me, others) {
-  if (me.ghost || me.invuln > 0) return;
+  if (me.ghost || me.invuln > 0) return false;
   const min = 2 * R;
+  let hit = false;
   for (const b of others) {
     if (!b.placed || b.ghost || b.invuln > 0 || Math.abs(me.y - b.y) > 1.2) continue;
-    let dx = me.x - b.x, dz = me.z - b.z;
+    let dx = me.x - (b.px ?? b.x), dz = me.z - (b.pz ?? b.z);
     const d2 = dx * dx + dz * dz;
     if (d2 >= min * min) continue;
     const d = Math.sqrt(d2);
@@ -383,7 +386,9 @@ export function collideWithOthers(me, others) {
     me.x += dx * pen; me.z += dz * pen;
     const rv = (me.vx - b.vx) * dx + (me.vz - b.vz) * dz;
     if (rv < 0) { const j2 = (-(1 + 0.35) * rv) / 2; me.vx += dx * j2; me.vz += dz * j2; }
+    hit = true;
   }
+  return hit;
 }
 
 export function stepWorld(w, chars, dt) {
