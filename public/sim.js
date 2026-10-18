@@ -11,8 +11,6 @@ export const FALL_Y = -12;        // below this a bean respawns at its checkpoin
 export const STEP = 1 / 120;      // fixed simulation step
 export const QUALIFY = 8;         // finishers that make the cut
 export const START_Z = 14;
-export const FINISH_Z = -244;
-export const COURSE_LEN = START_Z - FINISH_Z;
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const wrapPi = (a) => {
@@ -39,20 +37,24 @@ const emit = (w, type, ch, data) => w.onEvent && w.onEvent(type, ch, data);
 /* Course                                                              */
 /* ------------------------------------------------------------------ */
 
-// Every solid thing is a yaw-rotatable box ("collider"). Course runs toward -Z.
-export function createWorld() {
+// Every solid thing is a yaw-rotatable box ("collider"). Courses run toward -Z from the shared start pad.
+// A level only has to say what lies beyond the pad (see LEVELS below); physics and rendering are generic.
+export function createWorld(levelIdx = 0) {
+  const lv = LEVELS[levelIdx] || LEVELS[0];
   const w = {
     t: 0, raceT: 0, racing: false, lobby: false, mirror: false, raceOver: false, finishers: [],
-    colliders: [], movers: [], tiles: [], checkpoints: [], gate: null,
+    colliders: [], movers: [], tiles: [], checkpoints: [{ x: 0, y: 0, z: START_Z }], gate: null,
+    levelIdx: LEVELS.indexOf(lv), level: lv,
     onEvent: null,
   };
 
   const add = (o) => {
     const c = {
-      id: w.colliders.length, kind: 'platform',
+      id: w.colliders.length, kind: 'platform', pal: ['#ffffff', '#d9d2ff'],
       cx: 0, cy: 0, cz: 0, hx: 1, hy: 1, hz: 1, yaw: 0,
       vx: 0, vy: 0, vz: 0, dx: 0, dy: 0, dz: 0, omega: 0,
       active: true, hazard: false, dynamic: false, cp: undefined, update: null,
+      belt: null, ice: false, bounce: 0,
       ...o,
     };
     c.ext = Math.hypot(c.hx, c.hz);
@@ -62,86 +64,249 @@ export function createWorld() {
   // Slab whose top surface sits at `top`.
   const plat = (cx, top, cz, wd, dp, extra = {}) =>
     add({ cx, cy: top - 1, cz, hx: wd / 2, hy: 1, hz: dp / 2, ...extra });
+  // Register a respawn point and get its index (use it as a platform's `cp`).
+  const cp = (y, z, x = 0) => { w.checkpoints.push({ x, y, z }); return w.checkpoints.length - 1; };
+  // A rotating sweeper on a pillar.
+  const bar = (z, omega, phase, color, { y = 0, len = 11 } = {}) => {
+    add({ kind: 'pillar', cx: 0, cy: y + 1.4, cz: z, hx: 0.9, hy: 1.4, hz: 0.9, color: '#ffffff' });
+    const b = add({ kind: 'bar', cx: 0, cy: y + 0.75, cz: z, hx: len, hy: 0.4, hz: 0.45, hazard: true, omega, dynamic: true, color });
+    b.update = (c, world) => { c.yaw = omega * world.t + phase; };
+    return b;
+  };
+  // Move a collider back and forth along one axis: cx/cy/cz are the centre of travel, `amp` the half-travel.
+  const osc = (c, axis, amp, f, ph, base = c['c' + axis]) => {
+    c.dynamic = true;
+    c.update = (m, world, dt) => {
+      const n = base + amp * Math.sin(world.t * f + ph), key = 'c' + axis, d = 'd' + axis, v = 'v' + axis;
+      m[d] = n - m[key]; m[key] = n; m[v] = dt > 0 ? m[d] / dt : 0;
+    };
+    return c;
+  };
+  // Rows of falling tiles across six columns; one or two holes per row.
+  const tileField = (z0, rows, seed, colors, ice = false) => {
+    const rnd = mulberry(seed);
+    const cols = [-9.5, -5.7, -1.9, 1.9, 5.7, 9.5];
+    for (let k = 0; k < rows; k++) {
+      const missing = new Set();
+      const nMiss = 1 + (rnd() < 0.5 ? 1 : 0);
+      while (missing.size < nMiss) missing.add(Math.floor(rnd() * cols.length));
+      cols.forEach((x, i) => {
+        if (missing.has(i)) return;
+        const t = add({
+          kind: 'tile', cx: x, cy: -0.4, cz: z0 - 4 * k, hx: 1.75, hy: 0.4, hz: 1.75,
+          dynamic: true, color: colors[(i + k) % colors.length], ice,
+        });
+        t.baseY = -0.4; t.state = 'idle'; t.timer = 0; t.fv = 0; t.pop = 1;
+        t.update = tileUpdate;
+        w.tiles.push(t);
+      });
+    }
+  };
 
-  w.checkpoints = [
-    { x: 0, y: 0, z: 14 }, { x: 0, y: 0, z: -16 }, { x: 0, y: 0, z: -96 },
-    { x: 0, y: 0, z: -158 }, { x: 0, y: 0, z: -211 },
-  ];
-
-  // 1. Start pad (+ gate that drops on GO)
+  // Shared start pad (+ the gate that drops on GO). Every level starts here, so the lobby is the same everywhere.
   plat(0, 0, 8, 30, 32, { cp: 0, pal: ['#ffffff', '#ffc2dc'], label: 'start' });
   w.gate = add({ kind: 'gate', cx: 0, cy: 1.5, cz: 12.5, hx: 15, hy: 1.5, hz: 0.4 });
 
-  // 2. Sweeper bars
-  plat(0, 0, -31.5, 30, 41, { cp: 1, pal: ['#ffffff', '#bfe6ff'] });
-  const bar = (z, omega, phase, color) => {
-    add({ kind: 'pillar', cx: 0, cy: 1.4, cz: z, hx: 0.9, hy: 1.4, hz: 0.9, color: '#ffffff' });
-    const b = add({ kind: 'bar', cx: 0, cy: 0.75, cz: z, hx: 11, hy: 0.4, hz: 0.45, hazard: true, omega, dynamic: true, color });
-    b.update = (c, world) => { c.yaw = omega * world.t + phase; };
-  };
-  bar(-24, 1.1, 0, '#ff5d73');
-  bar(-40, -1.35, 1.2, '#ffb703');
-
-  // 3. Sliding platforms over the void
-  [[-58, 6, 0.9, 0], [-67, 6.5, 1.1, 1.7], [-76, 6, 0.8, 3.1], [-85, 6.5, 1.0, 4.4]]
-    .forEach(([z, amp, f, ph], i) => {
-      const c = add({
-        kind: 'mover', cx: 0, cy: -0.75, cz: z, hx: 3.5, hy: 0.75, hz: 3.5, dynamic: true,
-        pal: [['#ffffff', '#ff9ec7'], ['#ffffff', '#ffd166'], ['#ffffff', '#9be564'], ['#ffffff', '#8ecae6']][i],
-      });
-      c.update = (m, world, dt) => {
-        const nx = amp * Math.sin(world.t * f + ph);
-        m.dx = nx - m.cx; m.cx = nx; m.vx = dt > 0 ? m.dx / dt : 0;
-      };
-      w.movers.push(c);
-    });
-
-  // 4. Landing + falling tiles
-  plat(0, 0, -99, 24, 16, { cp: 2, pal: ['#ffffff', '#c8f2a0'] });
-  const rnd = mulberry(11);
-  const cols = [-9.5, -5.7, -1.9, 1.9, 5.7, 9.5];
-  const tileColors = ['#ff6b9d', '#ffd23f', '#3bceac', '#4ea8de'];
-  for (let k = 0; k < 10; k++) {
-    const missing = new Set();
-    const nMiss = 1 + (rnd() < 0.5 ? 1 : 0);
-    while (missing.size < nMiss) missing.add(Math.floor(rnd() * cols.length));
-    cols.forEach((x, i) => {
-      if (missing.has(i)) return;
-      const t = add({
-        kind: 'tile', cx: x, cy: -0.4, cz: -111 - 4 * k, hx: 1.75, hy: 0.4, hz: 1.75,
-        dynamic: true, color: tileColors[(i + k) % 4],
-      });
-      t.baseY = -0.4; t.state = 'idle'; t.timer = 0; t.fv = 0; t.pop = 1;
-      t.update = tileUpdate;
-      w.tiles.push(t);
-    });
-  }
-
-  // 5. Narrow bridge with side pistons
-  plat(0, 0, -161, 24, 18, { cp: 3, pal: ['#ffffff', '#ffd6a5'] });
-  plat(0, 0, -188, 6, 36, { pal: ['#ffffff', '#cdb4ff'] });
-  [[-178, 1, 1.5, 0], [-188, -1, 1.6, 2.2], [-198, 1, 1.4, 4.1]].forEach(([z, side, f, ph]) => {
-    const p = add({ kind: 'piston', cx: side * 7.5, cy: 0.8, cz: z, hx: 2, hy: 0.8, hz: 1.3, hazard: true, dynamic: true });
-    p.update = (c, world, dt) => {
-      const s = clamp(0.5 + 0.75 * Math.sin(world.t * f + ph), 0, 1);
-      const nx = side * (7.5 - 4.5 * s);
-      c.dx = nx - c.cx; c.cx = nx; c.vx = dt > 0 ? c.dx / dt : 0;
-    };
-  });
-
-  // 6. Stairs and the summit
-  plat(0, 0, -215, 24, 18, { cp: 4, pal: ['#ffffff', '#fff3a3'] });
-  for (let i = 1; i <= 5; i++) {
-    add({
-      kind: 'step', cx: 0, cy: 0.45 * i, cz: -224 - 3 * (i - 1) - 1.5,
-      hx: 7, hy: 0.45 * i, hz: 1.5, pal: ['#ffffff', ['#ff9ec7', '#ffd166', '#9be564', '#8ecae6', '#cdb4ff'][i - 1]],
-    });
-  }
-  plat(0, 4.5, -247, 20, 16, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+  lv.build(w, { add, plat, cp, bar, osc, tileField });
 
   resetWorld(w);
   return w;
 }
+
+/* ------------------------------------------------------------------ */
+/* Levels                                                              */
+/* ------------------------------------------------------------------ */
+// build(w, kit)  lays out everything beyond the start pad (kit = add, plat, cp, bar, osc, tileField).
+// finish         {z, y}: crossing z while standing at height >= y-1 qualifies (y is the summit's top).
+// ai(w, ch, b)   optional steering hint for bots: {tx, tz?} = where to aim instead of their usual lane.
+// theme          colours and scenery style for the renderer.
+const lanes = (b, k) => b.lane * k;
+
+export const LEVELS = [
+  {
+    id: 'summit',
+    name: 'Sweeper Summit',
+    blurb: 'Sweepers, sliding platforms, a tile field and a stair-climb to the crown.',
+    finish: { z: -244, y: 4.5 },
+    theme: {
+      sky: ['#5fc3ff', '#b9e6ff', '#ffd9ec'], fog: '#ffd3ea', ground: '#ffb8d9', goo: '#ff4fa3', gooGlow: '#6a1240',
+      pastel: ['#ffb3d1', '#b8e0ff', '#c8f2a0', '#ffe08a', '#d9c2ff', '#ffc8a2'], scenery: 'pillar',
+    },
+    build(w, { add, plat, cp, bar, tileField }) {
+      cp(0, -16); cp(0, -96); cp(0, -158); cp(0, -211);
+
+      // Sweeper bars
+      plat(0, 0, -31.5, 30, 41, { cp: 1, pal: ['#ffffff', '#bfe6ff'] });
+      bar(-24, 1.1, 0, '#ff5d73');
+      bar(-40, -1.35, 1.2, '#ffb703');
+
+      // Sliding platforms over the void
+      [[-58, 6, 0.9, 0], [-67, 6.5, 1.1, 1.7], [-76, 6, 0.8, 3.1], [-85, 6.5, 1.0, 4.4]]
+        .forEach(([z, amp, f, ph], i) => {
+          const c = add({
+            kind: 'mover', cx: 0, cy: -0.75, cz: z, hx: 3.5, hy: 0.75, hz: 3.5, dynamic: true,
+            pal: [['#ffffff', '#ff9ec7'], ['#ffffff', '#ffd166'], ['#ffffff', '#9be564'], ['#ffffff', '#8ecae6']][i],
+          });
+          c.update = (m, world, dt) => {
+            const nx = amp * Math.sin(world.t * f + ph);
+            m.dx = nx - m.cx; m.cx = nx; m.vx = dt > 0 ? m.dx / dt : 0;
+          };
+          w.movers.push(c);
+        });
+
+      // Landing + falling tiles
+      plat(0, 0, -99, 24, 16, { cp: 2, pal: ['#ffffff', '#c8f2a0'] });
+      tileField(-111, 10, 11, ['#ff6b9d', '#ffd23f', '#3bceac', '#4ea8de']);
+
+      // Narrow bridge with side pistons
+      plat(0, 0, -161, 24, 18, { cp: 3, pal: ['#ffffff', '#ffd6a5'] });
+      plat(0, 0, -188, 6, 36, { pal: ['#ffffff', '#cdb4ff'] });
+      [[-178, 1, 1.5, 0], [-188, -1, 1.6, 2.2], [-198, 1, 1.4, 4.1]].forEach(([z, side, f, ph]) => {
+        const p = add({ kind: 'piston', cx: side * 7.5, cy: 0.8, cz: z, hx: 2, hy: 0.8, hz: 1.3, hazard: true, dynamic: true });
+        p.update = (c, world, dt) => {
+          const s = clamp(0.5 + 0.75 * Math.sin(world.t * f + ph), 0, 1);
+          const nx = side * (7.5 - 4.5 * s);
+          c.dx = nx - c.cx; c.cx = nx; c.vx = dt > 0 ? c.dx / dt : 0;
+        };
+      });
+
+      // Stairs and the summit
+      plat(0, 0, -215, 24, 18, { cp: 4, pal: ['#ffffff', '#fff3a3'] });
+      for (let i = 1; i <= 5; i++) {
+        add({
+          kind: 'step', cx: 0, cy: 0.45 * i, cz: -224 - 3 * (i - 1) - 1.5,
+          hx: 7, hy: 0.45 * i, hz: 1.5, pal: ['#ffffff', ['#ff9ec7', '#ffd166', '#9be564', '#8ecae6', '#cdb4ff'][i - 1]],
+        });
+      }
+      plat(0, 4.5, -247, 20, 16, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      const z = ch.z;
+      if (z < -46 && z > -92 && ch.y > -3) {
+        // Chase the next sliding platform.
+        const from = ch.ground && ch.ground.kind === 'mover' ? ch.ground.cz - 1 : z - 1;
+        const m = w.movers.find((p) => p.cz < from);
+        return m ? { tx: m.cx + m.vx * 0.3, tz: m.cz } : { tx: 0 };
+      }
+      if (z < -112 && z > -150) return { tx: lanes(b, 0.55) };
+      if (z < -166 && z > -208) return { tx: Math.sin(w.t * b.nf + b.np) * 0.4 };
+      if (z < -222) return { tx: lanes(b, 0.4) };
+      return null;
+    },
+  },
+
+  {
+    id: 'conveyor',
+    name: 'Conveyor Crunch',
+    blurb: 'Run against the belts, get shoved sideways, then bounce across the gaps.',
+    finish: { z: -153, y: 4 },
+    theme: {
+      sky: ['#ff8a5c', '#ffc27a', '#ffe9b8'], fog: '#ffd9a8', ground: '#ffb07a', goo: '#2ec4b6', gooGlow: '#0a4a45',
+      pastel: ['#ffd1a1', '#ffe0b3', '#f6a97a', '#9ad7cf', '#ffc2a2', '#ffeab0'], scenery: 'box',
+    },
+    build(w, { plat, cp, bar }) {
+      const warm = (c) => ['#ffffff', c];
+      // A: a belt running back toward the start, with two sweepers on it
+      plat(0, 0, -28, 30, 40, { belt: { x: 0, z: 3 }, pal: warm('#ffb4a2') });
+      bar(-22, 1.3, 0, '#ff5d73');
+      bar(-38, -1.5, 1.2, '#ffb703');
+      plat(0, 0, -55, 30, 14, { cp: cp(0, -52), pal: warm('#ffe3a3') });
+      // C: three side belts that shove you toward the edge, alternating direction
+      plat(0, 0, -67, 18, 10, { belt: { x: 4.5, z: 0 }, pal: warm('#a0e7e5') });
+      plat(0, 0, -77, 18, 10, { belt: { x: -4.5, z: 0 }, pal: warm('#b4f8c8') });
+      plat(0, 0, -87, 18, 10, { belt: { x: 4.5, z: 0 }, pal: warm('#a0e7e5') });
+      plat(0, 0, -99, 30, 14, { cp: cp(0, -96), pal: warm('#ffe3a3') });
+      // First launch: a 7 m gap that only the bounce pad gets you across. A pad launches you from its
+      // front edge, so it is kept thin and the landing deck starts ~9 m beyond that edge.
+      plat(0, 0, -107, 30, 2, { bounce: 22, pal: ['#ffffff', '#ff7ab6'] });
+      plat(0, 0, -122, 30, 14, { cp: cp(0, -118), pal: warm('#ffd6a5') });
+      bar(-124, 1.6, 0, '#ff5d73');
+      bar(-124, 1.6, Math.PI / 2, '#ff5d73');
+      // Second launch: up onto the summit (the deck is 4 m higher, so it sits closer)
+      plat(0, 0, -130, 30, 2, { bounce: 24, pal: ['#ffffff', '#ff7ab6'] });
+      plat(0, 4, -150, 30, 26, { cp: cp(4, -141), pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      const z = ch.z;
+      if (z < -60 && z > -96) return { tx: 0 };               // stay centred while the side belts push
+      return { tx: lanes(b, 0.45) };
+    },
+  },
+
+  {
+    id: 'ice',
+    name: 'Slip & Slide',
+    blurb: 'Everything is icy: steering is loose, sweepers send you skating, and the tiles are slick.',
+    finish: { z: -208, y: 0 },
+    theme: {
+      sky: ['#7fb7ff', '#cfeaff', '#f2fbff'], fog: '#e3f4ff', ground: '#cfe9ff', goo: '#7fe3ff', gooGlow: '#134a63',
+      pastel: ['#ffffff', '#d6efff', '#c4e3ff', '#e8f6ff', '#bfeaf5', '#ffffff'], scenery: 'cone',
+    },
+    build(w, { add, plat, cp, bar, tileField }) {
+      const icy = (c) => ['#f4fcff', c];
+      // A: an ice rink with two sweepers
+      plat(0, 0, -28, 30, 40, { ice: true, pal: icy('#bfe8ff') });
+      bar(-22, 1.0, 0, '#5dc8ff');
+      bar(-38, -1.2, 1.2, '#7b8cff');
+      plat(0, 0, -54, 30, 12, { cp: cp(0, -52), pal: icy('#cfe0ff') });
+      // C: icy bridge with pistons that nudge you toward the edge
+      plat(0, 0, -81, 12, 42, { ice: true, pal: icy('#a8d8ff') });
+      [[-70, 1, 1.4, 0], [-82, -1, 1.5, 2.2], [-94, 1, 1.3, 4.1]].forEach(([z, side, f, ph]) => {
+        const p = add({ kind: 'piston', cx: side * 8.5, cy: 0.8, cz: z, hx: 2, hy: 0.8, hz: 1.3, hazard: true, dynamic: true });
+        p.update = (c, world, dt) => {
+          const s = clamp(0.5 + 0.7 * Math.sin(world.t * f + ph), 0, 1);
+          const nx = side * (8.5 - 4.5 * s);
+          c.dx = nx - c.cx; c.cx = nx; c.vx = dt > 0 ? c.dx / dt : 0;
+        };
+      });
+      plat(0, 0, -108, 30, 12, { cp: cp(0, -106), pal: icy('#cfe0ff') });
+      // E: slippery falling tiles
+      tileField(-116, 8, 23, ['#d6f1ff', '#bfe3ff', '#e9f8ff', '#aee0f2'], true);
+      plat(0, 0, -158, 30, 16, { cp: cp(0, -154), pal: icy('#cfe0ff') });
+      // G: the finale rink
+      plat(0, 0, -192, 30, 52, { ice: true, pal: ['#fffdf2', '#ffe9a6'], label: 'summit' });
+      bar(-180, 1.2, 0, '#ff9ec7');
+      bar(-196, -1.4, 0.8, '#ffb703');
+    },
+    ai(w, ch, b) {
+      const z = ch.z;
+      if (z < -62 && z > -102) return { tx: Math.sin(w.t * b.nf + b.np) * 1.2 };   // stay on the bridge
+      if (z < -114 && z > -150) return { tx: lanes(b, 0.55) };
+      return { tx: lanes(b, 0.5) };
+    },
+  },
+
+  {
+    id: 'lifts',
+    name: 'Sky Lifts',
+    blurb: 'Time the elevators up into the clouds, then dash along a sky bridge of sweepers.',
+    finish: { z: -148, y: 10 },
+    theme: {
+      sky: ['#3a2f8f', '#c36bb5', '#ffb677'], fog: '#e8a6b8', ground: '#8a6bd0', goo: '#ffe6f2', gooGlow: '#8a5a9a',
+      pastel: ['#ff9ec7', '#ffd166', '#9be0ff', '#d9c2ff', '#ffb677', '#c8f2a0'], scenery: 'pillar',
+    },
+    build(w, { plat, cp, bar, osc }) {
+      const sky = (c) => ['#ffffff', c];
+      plat(0, 0, -24, 30, 32, { cp: cp(0, -37), pal: sky('#ffc2dc') });
+      bar(-26, 1.2, 0, '#ff5d73');
+      // Lift 1: surface at 0 <-> 5
+      osc(plat(0, 0, -48, 10, 10, { kind: 'mover', pal: sky('#ffd166') }), 'y', 2.5, 0.95, 0, 1.5);
+      plat(0, 5, -63, 30, 14, { cp: cp(5, -59), pal: sky('#9be564') });
+      // Lift 2: surface at 5 <-> 10
+      osc(plat(0, 5, -76, 10, 10, { kind: 'mover', pal: sky('#8ecae6') }), 'y', 2.5, 0.9, 1.7, 6.5);
+      plat(0, 10, -91, 30, 14, { cp: cp(10, -87), pal: sky('#cdb4ff') });
+      // The sky bridge
+      plat(0, 10, -117, 8, 40, { pal: sky('#ffc2dc') });
+      bar(-108, 1.8, 0, '#ff5d73', { y: 10, len: 7 });
+      bar(-122, -2.0, 1.0, '#ffb703', { y: 10, len: 7 });
+      plat(0, 10, -150, 26, 26, { cp: cp(10, -141), pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      if (ch.z < -40) return { tx: Math.sin(w.t * b.nf + b.np) * 0.6 };
+      return { tx: lanes(b, 0.4) };
+    },
+  },
+];
 
 function tileUpdate(c, w, dt) {
   c.dx = c.dy = c.dz = 0;
@@ -247,6 +412,11 @@ function collide(w, ch, c, dt) {
   // Land on top when the feet are near the surface and we are not rising.
   const tol = 0.35 + Math.max(0, -ch.vy) * dt;
   if (ch.y >= top - tol && ch.vy <= 1) {
+    if (c.bounce) {                                    // bounce pad: launch instead of landing
+      ch.y = top; ch.vy = c.bounce;
+      emit(w, 'jump', ch);
+      return;
+    }
     if (ch.vy < 0) { ch.landV = Math.max(ch.landV, -ch.vy); ch.vy = 0; }
     ch.y = top; ch.grounded = true; ch.ground = c;
     if (c.cp !== undefined && c.cp > ch.cp) ch.cp = c.cp;
@@ -282,7 +452,11 @@ function collide(w, ch, c, dt) {
 export function stepChar(w, ch, dt) {
   // Ride whatever we were standing on.
   const g = ch.ground;
-  if (g && g.active) { ch.x += g.dx; ch.y += g.dy; ch.z += g.dz; }
+  if (g && g.active) {
+    ch.x += g.dx; ch.y += g.dy; ch.z += g.dz;
+    if (g.belt) { ch.x += g.belt.x * dt; ch.z += g.belt.z * dt; }       // conveyor
+  }
+  const ice = !!(g && g.ice);
 
   ch.t += dt;
   if (ch.invuln > 0) ch.invuln -= dt;
@@ -312,11 +486,11 @@ export function stepChar(w, ch, dt) {
 
   if (canControl) {
     let ax = wx * ch.maxSpeed - ch.vx, az = wz * ch.maxSpeed - ch.vz;
-    const len = Math.hypot(ax, az), maxd = (ch.grounded ? 48 : 24) * dt;
+    const len = Math.hypot(ax, az), maxd = (ch.grounded ? (ice ? 9 : 48) : 24) * dt;
     if (len > maxd) { ax *= maxd / len; az *= maxd / len; }
     ch.vx += ax; ch.vz += az;
   } else if (ch.grounded) {
-    const fr = (ch.state === 'dive' ? 7 : ch.state === 'stun' ? 6 : 30) * dt;
+    const fr = (ch.state === 'dive' ? 7 : ch.state === 'stun' ? 6 : 30) * (ice ? 0.14 : 1) * dt;
     const sp = Math.hypot(ch.vx, ch.vz);
     if (sp > 0) { const k = Math.max(0, sp - fr) / sp; ch.vx *= k; ch.vz *= k; }
   }
@@ -408,7 +582,7 @@ export function stepWorld(w, chars, dt) {
 
   for (const ch of chars) {
     if (ch.y < FALL_Y && !ch.finished) { emit(w, 'fall', ch); respawn(w, ch); continue; }
-    if (!ch.finished && w.racing && ch.z < FINISH_Z && ch.y > 3.5) {
+    if (!ch.finished && w.racing && ch.z < w.level.finish.z && ch.y > w.level.finish.y - 1) {
       ch.finished = true; ch.finishT = w.raceT; ch.finishOrder = w.finishers.length;
       ch.state = 'done'; ch.ghost = true; ch.wishX = ch.wishZ = 0;
       w.finishers.push(ch);
@@ -470,14 +644,8 @@ export function botThink(w, ch, dt) {
 
   const z = ch.z;
   let tx = b.lane, tz = z - 8;
-  if (z < -46 && z > -92 && ch.y > -3) {
-    // Chase the next sliding platform.
-    const from = ch.ground && ch.ground.kind === 'mover' ? ch.ground.cz - 1 : z - 1;
-    const m = w.movers.find((p) => p.cz < from);
-    if (m) { tx = m.cx + m.vx * 0.3; tz = m.cz; } else { tx = 0; }
-  } else if (z < -112 && z > -150) tx = b.lane * 0.55;
-  else if (z < -166 && z > -208) tx = Math.sin(w.t * b.nf + b.np) * 0.4;
-  else if (z < -222) tx = b.lane * 0.4;
+  const aim = w.level.ai && w.level.ai(w, ch, b);        // each level steers its bots through its own set pieces
+  if (aim) { tx = aim.tx; if (aim.tz !== undefined) tz = aim.tz; }
 
   let dx = tx - ch.x, dz = tz - ch.z;
   const len = Math.hypot(dx, dz) || 1;

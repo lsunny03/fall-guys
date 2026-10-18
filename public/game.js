@@ -70,15 +70,19 @@ function canvasTex(w, h, draw, srgb = true) {
   return t;
 }
 
-// Sky gradient
-scene.background = canvasTex(2, 512, (g, w, h) => {
-  const grad = g.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, '#5fc3ff'); grad.addColorStop(0.55, '#b9e6ff'); grad.addColorStop(1, '#ffd9ec');
-  g.fillStyle = grad; g.fillRect(0, 0, w, h);
-});
+// Sky gradient (colours come from the level's theme)
+function skyTex(stops) {
+  return canvasTex(2, 512, (g, w, h) => {
+    const grad = g.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, stops[0]); grad.addColorStop(0.55, stops[1]); grad.addColorStop(1, stops[2]);
+    g.fillStyle = grad; g.fillRect(0, 0, w, h);
+  });
+}
+scene.background = skyTex(S.LEVELS[0].theme.sky);
 
 const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1200);
-scene.add(new THREE.HemisphereLight(0xffffff, 0xffb8d9, 1.6));
+const hemi = new THREE.HemisphereLight(0xffffff, 0xffb8d9, 1.6);
+scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff1dc, 2.2);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
@@ -135,18 +139,59 @@ function darker(hex, k = 0.82) { return new THREE.Color(hex).multiplyScalar(k); 
 /* ------------------------------------------------------------------ */
 /* World + course meshes                                               */
 /* ------------------------------------------------------------------ */
-const world = S.createWorld();
-const visuals = [];   // { mesh, c }
+// The room's level decides everything below. loadLevel() swaps the sim world, the meshes, the scenery
+// and the colours in one go; nothing else in this file assumes a particular course.
+let world = null;
+let levelIdx = -1;
+let crownBaseY = 6.9;
+const visuals = [];                       // { mesh, c } for every collider that moves or toggles
+const course = new THREE.Group();         // everything specific to the current level
+scene.add(course);
+const floaters = [];
+const beltAnim = new Map();               // arrow texture -> belt velocity, scrolled every frame
 
-function buildCourse() {
-  for (const c of world.colliders) {
+// Chevron texture for conveyor belts. In the canvas "up" is -Z and "right" is +X on the deck's top face.
+function arrowTex(dir, c1, c2, rx, ry) {
+  const key = `a${dir}${c1}${c2}${rx.toFixed(2)}${ry.toFixed(2)}`;
+  if (!texCache.has(key)) {
+    const rot = { up: 0, right: Math.PI / 2, down: Math.PI, left: -Math.PI / 2 }[dir];
+    const t = canvasTex(128, 128, (g) => {
+      g.fillStyle = c1; g.fillRect(0, 0, 128, 128);
+      g.translate(64, 64); g.rotate(rot); g.translate(-64, -64);
+      g.strokeStyle = c2; g.lineWidth = 14; g.lineCap = 'round'; g.lineJoin = 'round';
+      for (const oy of [-20, 44, 108]) {              // period 64 divides 128, so the pattern tiles seamlessly
+        g.beginPath(); g.moveTo(28, oy + 40); g.lineTo(64, oy); g.lineTo(100, oy + 40); g.stroke();
+      }
+    });
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(Math.max(1, rx), Math.max(1, ry));
+    t.anisotropy = 4;
+    texCache.set(key, t);
+  }
+  return texCache.get(key);
+}
+
+function buildCourse(w) {
+  for (const c of w.colliders) {
     const w2 = c.hx * 2, h2 = c.hy * 2, d2 = c.hz * 2;
     let mesh;
     switch (c.kind) {
       case 'platform': case 'mover': case 'step': {
         const [c1, c2] = c.pal;
         const side = new THREE.MeshStandardMaterial({ color: darker(c2), roughness: 0.7 });
-        const top = new THREE.MeshStandardMaterial({ map: checkerTex(c1, c2, w2 / 4, d2 / 4), roughness: 0.6 });
+        let top;
+        if (c.belt) {
+          const dir = Math.abs(c.belt.x) > Math.abs(c.belt.z) ? (c.belt.x > 0 ? 'right' : 'left') : (c.belt.z > 0 ? 'down' : 'up');
+          const map = arrowTex(dir, c1, c2, w2 / 4, d2 / 4);
+          beltAnim.set(map, c.belt);
+          top = new THREE.MeshStandardMaterial({ map, roughness: 0.55 });
+        } else if (c.ice) {
+          top = new THREE.MeshStandardMaterial({ map: checkerTex(c1, c2, w2 / 5, d2 / 5), roughness: 0.06, metalness: 0.2 });
+        } else if (c.bounce) {
+          top = new THREE.MeshStandardMaterial({ map: checkerTex(c1, c2, w2 / 3, 1), roughness: 0.3, emissive: c2, emissiveIntensity: 0.55 });
+        } else {
+          top = new THREE.MeshStandardMaterial({ map: checkerTex(c1, c2, w2 / 4, d2 / 4), roughness: 0.6 });
+        }
         mesh = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), [side, side, top, side, side, side]);
         break;
       }
@@ -164,7 +209,7 @@ function buildCourse() {
         break;
       case 'tile':
         mesh = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2),
-          new THREE.MeshStandardMaterial({ color: c.color, roughness: 0.45 }));
+          new THREE.MeshStandardMaterial({ color: c.color, roughness: c.ice ? 0.08 : 0.45, metalness: c.ice ? 0.2 : 0 }));
         break;
       case 'gate':
         mesh = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2),
@@ -176,11 +221,10 @@ function buildCourse() {
     mesh.rotation.y = c.yaw;
     if (c.kind !== 'gate') { mesh.castShadow = c.kind !== 'tile'; mesh.receiveShadow = true; }
     if (!c.dynamic && c.kind !== 'gate') { mesh.updateMatrix(); mesh.matrixAutoUpdate = false; }
-    scene.add(mesh);
+    course.add(mesh);
     visuals.push({ mesh, c });
   }
 }
-buildCourse();
 
 function textPlane(text, w, h, bg, fg) {
   const tex = canvasTex(1024, Math.round(1024 * h / w), (g, cw, ch) => {
@@ -193,25 +237,25 @@ function textPlane(text, w, h, bg, fg) {
     g.lineWidth = ch * 0.07; g.strokeStyle = '#2b1b4a'; g.lineJoin = 'round';
     g.strokeText(text, cw / 2, ch / 2 + 4); g.fillText(text, cw / 2, ch / 2 + 4);
   });
-  return new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+  mesh.userData.ownMap = true;          // not in texCache, so clearCourse() frees it
+  return mesh;
 }
 
 function buildArch(z, baseY, text, bg, fg, half = 11) {
   const pillarMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.4 });
   for (const s of [-1, 1]) {
     const p = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.7, 10, 20), pillarMat);
-    p.position.set(s * half, baseY + 5, z); p.castShadow = true; scene.add(p);
+    p.position.set(s * half, baseY + 5, z); p.castShadow = true; course.add(p);
     const cap = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), new THREE.MeshStandardMaterial({ color: bg, roughness: 0.3 }));
-    cap.position.set(s * half, baseY + 10.2, z); scene.add(cap);
+    cap.position.set(s * half, baseY + 10.2, z); course.add(cap);
   }
   const sign = textPlane(text, half * 2 + 2, 3.4, bg, fg);
   sign.position.set(0, baseY + 10.6, z);
-  scene.add(sign);
+  course.add(sign);
 }
-buildArch(S.START_Z - 1.5, 0, 'START', '#ff4fa3', '#ffffff', 15.2);
-buildArch(S.FINISH_Z, 4.5, 'FINISH', '#3a86ff', '#ffd23f', 10.5);
 
-// Crown on a podium at the summit
+// Crown that hovers over the podium at the summit (the group lives for the whole session; loadLevel moves it).
 const crown = new THREE.Group();
 {
   const gold = new THREE.MeshStandardMaterial({ color: '#ffc928', metalness: 0.7, roughness: 0.25, emissive: '#7a4a00', emissiveIntensity: 0.5, side: THREE.DoubleSide });
@@ -225,15 +269,11 @@ const crown = new THREE.Group();
     ball.position.set(Math.cos(a) * 0.55, 0.78, Math.sin(a) * 0.55);
     crown.add(spike, ball);
   }
-  crown.position.set(0, 4.5 + 2.4, -249.5);
   crown.scale.setScalar(1.8);
   scene.add(crown);
-  const podium = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.6, 1.6, 28), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.4 }));
-  podium.position.set(0, 4.5 + 0.8, -249.5); podium.castShadow = true; podium.receiveShadow = true;
-  scene.add(podium);
 }
 
-// Goo sea below the course
+// Goo sea below the course (the theme recolours it)
 const goo = new THREE.Mesh(
   new THREE.PlaneGeometry(900, 900, 90, 90).rotateX(-Math.PI / 2),
   new THREE.MeshStandardMaterial({ color: '#ff4fa3', emissive: '#6a1240', roughness: 0.25, metalness: 0.05 }),
@@ -250,42 +290,99 @@ function animateGoo(t) {
   pos.needsUpdate = true;
 }
 
-// Scenery: pastel pillars, floating balls, clouds
-const floaters = [];
-{
-  const pastel = ['#ffb3d1', '#b8e0ff', '#c8f2a0', '#ffe08a', '#d9c2ff', '#ffc8a2'];
-  for (let i = 0; i < 38; i++) {
+// Arches, podium and the themed scenery that lines the course.
+function buildDecor(lv) {
+  const th = lv.theme, fz = lv.finish.z, fy = lv.finish.y;
+  const len = S.START_Z - fz;
+  buildArch(S.START_Z - 1.5, 0, 'START', '#ff4fa3', '#ffffff', 15.2);
+  buildArch(fz, fy, 'FINISH', '#3a86ff', '#ffd23f', 10.5);
+
+  const podium = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.6, 1.6, 28), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.4 }));
+  podium.position.set(0, fy + 0.8, fz - 5.5); podium.castShadow = true; podium.receiveShadow = true;
+  course.add(podium);
+  crownBaseY = fy + 2.4;
+  crown.position.set(0, crownBaseY, fz - 5.5);
+  goo.position.z = (S.START_Z + fz) / 2;
+
+  const pastel = th.pastel;
+  const count = Math.ceil((len + 80) / 7.5);
+  for (let i = 0; i < count; i++) {
     const side = i % 2 ? 1 : -1;
     const x = side * (26 + Math.random() * 55), z = 50 - i * 7.5 - Math.random() * 4;
     const r = 2.5 + Math.random() * 4, h = 14 + Math.random() * 40;
-    const col = pastel[i % pastel.length];
-    const m = new THREE.MeshStandardMaterial({ color: col, roughness: 0.55 });
-    const body = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h + 8, 20), m);
-    body.position.set(x, h / 2 - 4, z);
-    const cap = new THREE.Mesh(new THREE.SphereGeometry(r * 1.02, 20, 14), m);
-    cap.position.set(x, h - 0.1, z);
-    body.matrixAutoUpdate = cap.matrixAutoUpdate = false; body.updateMatrix(); cap.updateMatrix();
-    scene.add(body, cap);
+    const m = new THREE.MeshStandardMaterial({ color: pastel[i % pastel.length], roughness: 0.55 });
+    const parts = [];
+    if (th.scenery === 'cone') {           // ice spires
+      parts.push(new THREE.Mesh(new THREE.ConeGeometry(r * 1.3, h + 8, 6), m)); parts[0].position.set(x, h / 2 - 4, z);
+    } else if (th.scenery === 'box') {      // factory silos
+      parts.push(new THREE.Mesh(new THREE.BoxGeometry(r * 1.7, h + 8, r * 1.7), m)); parts[0].position.set(x, h / 2 - 4, z);
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(r * 1.2, 2.5, r * 1.2), m); roof.position.set(x, h + 0.4, z); parts.push(roof);
+    } else {
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h + 8, 20), m); body.position.set(x, h / 2 - 4, z);
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(r * 1.02, 20, 14), m); cap.position.set(x, h - 0.1, z);
+      parts.push(body, cap);
+    }
+    for (const part of parts) { part.matrixAutoUpdate = false; part.updateMatrix(); course.add(part); }
   }
-  for (let i = 0; i < 26; i++) {
+  const nBalls = Math.max(14, Math.round(26 * (len + 60) / 300));
+  for (let i = 0; i < nBalls; i++) {
     const m = new THREE.Mesh(new THREE.SphereGeometry(1.2 + Math.random() * 2.2, 18, 12),
       new THREE.MeshStandardMaterial({ color: pastel[i % pastel.length], roughness: 0.3 }));
-    m.position.set((Math.random() < 0.5 ? -1 : 1) * (22 + Math.random() * 30), 6 + Math.random() * 22, 40 - Math.random() * 300);
+    m.position.set((Math.random() < 0.5 ? -1 : 1) * (22 + Math.random() * 30), 6 + Math.random() * 22, 40 - Math.random() * (len + 60));
     m.userData = { base: m.position.y, ph: Math.random() * 6.28, sp: 0.4 + Math.random() * 0.8 };
-    scene.add(m); floaters.push(m);
+    course.add(m); floaters.push(m);
   }
   const cloudMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1, emissive: '#ffffff', emissiveIntensity: 0.35 });
-  for (let i = 0; i < 22; i++) {
+  for (let i = 0; i < Math.max(12, Math.round(22 * (len + 60) / 300)); i++) {
     const g = new THREE.Group();
     for (let j = 0; j < 4; j++) {
       const s = new THREE.Mesh(new THREE.SphereGeometry(4 + Math.random() * 4, 12, 8), cloudMat);
       s.position.set(j * 6 - 9 + Math.random() * 2, Math.random() * 2, Math.random() * 3); g.add(s);
     }
-    g.position.set((Math.random() - 0.5) * 360, 55 + Math.random() * 40, 60 - Math.random() * 380);
+    g.position.set((Math.random() - 0.5) * 360, 55 + Math.random() * 40, 60 - Math.random() * (len + 140));
     g.matrixAutoUpdate = false; g.updateMatrix();
-    scene.add(g);
+    course.add(g);
   }
 }
+
+function applyTheme(th) {
+  const old = scene.background;
+  scene.background = skyTex(th.sky);
+  if (old && old.dispose) old.dispose();
+  scene.fog.color.set(th.fog);
+  hemi.groundColor.set(th.ground);
+  goo.material.color.set(th.goo);
+  goo.material.emissive.set(th.gooGlow);
+}
+
+function clearCourse() {
+  const cached = new Set(texCache.values());
+  course.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+    for (const m of mats) {
+      if (m.map && !cached.has(m.map) && o.userData.ownMap) m.map.dispose();
+      m.dispose();
+    }
+  });
+  course.clear();
+  visuals.length = 0; floaters.length = 0; beltAnim.clear();
+}
+
+// Swap in course `idx`. Returns true when something changed (callers then re-sync the local sim).
+function loadLevel(idx) {
+  if (idx === levelIdx || !S.LEVELS[idx]) return false;
+  levelIdx = idx;
+  clearCourse();
+  world = S.createWorld(idx);
+  world.mirror = true;                  // this copy only predicts; the server is the authority
+  world.onEvent = onWorldEvent;
+  buildCourse(world);
+  buildDecor(world.level);
+  applyTheme(world.level.theme);
+  return true;
+}
+loadLevel(0);
 
 /* ------------------------------------------------------------------ */
 /* Beans                                                               */
@@ -459,7 +556,7 @@ const STATES = ['run', 'dive', 'stun', 'done'];
 const dots = new Map();
 
 // N: what the server last told us. G: purely local UI state.
-const N = { phase: -1, pt: -1, rt: 0, rtAt: 0, over: false, fin: 0, code: '', pub: false, host: false, synced: false };
+const N = { lv: 0, pick: -1, phase: -1, pt: -1, rt: 0, rtAt: 0, over: false, fin: 0, code: '', pub: false, host: false, synced: false };
 const G = { inRoom: false, shownN: 0, hintT: 0, now: 0 };
 
 function addChar(c, isMe) {
@@ -488,7 +585,6 @@ function removeChar(ch) {
 /* ------------------------------------------------------------------ */
 /* Networking: prediction for me, interpolation for everyone else      */
 /* ------------------------------------------------------------------ */
-world.mirror = true;        // this copy of the world only predicts; the server is the authority
 let ws = null, wsReady = null;
 let simMs = 0;              // my simulation clock (ms): inputs and the history below are stamped with it
 let tOff = 0;               // world time = simMs/1000 + tOff, kept in step with the server's platforms
@@ -537,7 +633,8 @@ function onMessage(m) {
 }
 
 function applyRoster(m) {
-  N.host = !!m.host; N.code = m.code; N.pub = !!m.pub;
+  N.host = !!m.host; N.code = m.code; N.pub = !!m.pub; N.lv = m.lv ?? 0; N.pick = m.pick ?? -1;
+  if (loadLevel(N.lv)) { resetLocalWorld(); snapBuf.length = 0; }     // the room moved to another course
   const ids = new Set(m.chars.map((c) => c.i));
   for (const ch of [...chars]) if (!ids.has(ch.id)) removeChar(ch);
   for (const c of m.chars) {
@@ -828,7 +925,7 @@ function updateHud(now) {
       d.style.background = ch.color;
       hud.track.append(d); dots.set(ch.id, d);
     }
-    d.style.left = `${clamp((S.START_Z - ch.z) / S.COURSE_LEN, 0, 1) * 100}%`;
+    d.style.left = `${clamp((S.START_Z - ch.z) / (S.START_Z - world.level.finish.z), 0, 1) * 100}%`;
   }
 }
 
@@ -848,7 +945,27 @@ function renderLobby(list) {
     ul.append(li);
   }
   $('startBtn').hidden = N.pub || !N.host;
+  renderLevelPick();
   updateLobbyStatus();
+}
+
+// The host of a private room chooses the course (or leaves it on Random); everyone else just sees what's next.
+function renderLevelPick() {
+  const box = $('levelPick'); box.textContent = '';
+  const lv = S.LEVELS[N.lv] || S.LEVELS[0];
+  const canPick = !N.pub && N.host;
+  const items = canPick ? [{ i: -1, label: 'Random' }, ...S.LEVELS.map((l, i) => ({ i, label: l.name }))] : [{ i: N.lv, label: lv.name }];
+  for (const it of items) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'chip-btn level-chip'; b.textContent = it.label;
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', String(canPick ? N.pick === it.i : true));
+    if (canPick) b.addEventListener('click', () => send({ t: 'level', i: it.i }));
+    else b.disabled = true;
+    box.append(b);
+  }
+  $('levelLabel').textContent = canPick ? 'COURSE' : 'NEXT COURSE';
+  $('levelBlurb').textContent = lv.blurb;
 }
 function updateLobbyStatus() {
   let s;
@@ -952,12 +1069,12 @@ function enterPhase(ph, prev) {
   hud.root.hidden = ph === 0;
   $('touch').hidden = !isTouch || ph === 3;
   if (ph === 0) renderLobby(chars.filter((c) => c.human).map((c) => ({ i: c.id, n: c.name, c: c.color, h: 1 })));
-  if (ph === 1) { G.shownN = 0; G.hintT = 0; hud.hint.classList.remove('fade'); }
+  if (ph === 1) { G.shownN = 0; G.hintT = 0; hud.hint.classList.remove('fade'); toast(world.level.name, 2800); }
   if (ph === 2 && prev === 1) { banner('GO!', 'go'); sfx.go(); }
 }
 
 // Local events from my own predicted bean (sounds and feedback)
-world.onEvent = (type, ch, data) => {
+function onWorldEvent(type, ch, data) {
   const v = vis.get(ch.id);
   if (type === 'land' && v) v.squash = Math.min(0.5, data / 35);
   if (ch !== player) return;
@@ -968,7 +1085,7 @@ world.onEvent = (type, ch, data) => {
     case 'bonk': sfx.bonk(); cam.shake = 0.5; toast('Bonk!', 900); break;
     default: break;
   }
-};
+}
 
 /* ------------------------------------------------------------------ */
 /* Camera + per-frame visuals                                          */
@@ -1011,6 +1128,10 @@ function updateCamera(dt, time) {
 }
 
 function updateVisuals(dt, time) {
+  for (const [tex, b] of beltAnim) {                  // scroll the chevrons the way the belt carries you (4 m per pattern)
+    tex.offset.x = -(b.x / 4) * time;
+    tex.offset.y = (b.z / 4) * time;
+  }
   for (const { mesh, c } of visuals) {
     if (!c.dynamic && c.kind !== 'gate') continue;
     mesh.visible = c.active;
@@ -1032,7 +1153,7 @@ function updateVisuals(dt, time) {
   }
   for (const m of floaters) m.position.y = m.userData.base + Math.sin(time * m.userData.sp + m.userData.ph) * 1.4;
   crown.rotation.y = time * 1.6;
-  crown.position.y = 4.5 + 2.4 + Math.sin(time * 2) * 0.18;
+  crown.position.y = crownBaseY + Math.sin(time * 2) * 0.18;
   // sun follows the action so shadows stay crisp
   sun.position.set(cam.focus.x + 22, cam.focus.y + 42, cam.focus.z + 16);
   sun.target.position.copy(cam.focus);
@@ -1101,6 +1222,7 @@ async function boot() {
   // Let the web font load so the name tags render in it (don't wait forever).
   await Promise.race([document.fonts ? document.fonts.ready : Promise.resolve(), new Promise((r) => setTimeout(r, 1200))]);
   resetLocalWorld();
+  $('tagline').textContent = `${TOTAL} beans. ${S.LEVELS.length} courses. ${S.QUALIFY} make it to the crown.`;
   $('playBtn').addEventListener('click', () => joinRoom('public'));
   $('soloBtn').addEventListener('click', () => joinRoom('solo'));
   $('createBtn').addEventListener('click', () => joinRoom('create'));
@@ -1126,7 +1248,7 @@ async function boot() {
     $('menuErr').hidden = false;
   }
   window.__fallBeansReady = true;
-  window.__fb = { world, chars, N, G, cam, hist, get player() { return player; }, get simMs() { return simMs; } };   // debugging handle
+  window.__fb = { get world() { return world; }, chars, N, G, cam, hist, get player() { return player; }, get simMs() { return simMs; } };   // debugging handle
   $('loading').classList.add('done');
   setTimeout(() => ($('loading').hidden = true), 600);
   requestAnimationFrame(frame);

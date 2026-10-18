@@ -45,7 +45,7 @@
   <div id="menu" class="overlay">
     <div class="menu-card">
       <h1 class="logo"><span>Fall</span> <span>Beans</span></h1>
-      <p class="tag">12 beans. 1 course. 8 make it to the crown.</p>
+      <p id="tagline" class="tag">12 beans. 8 make it to the crown.</p>
       <label class="field">
         <span>Your name</span>
         <input id="nameInput" type="text" maxlength="14" value="Player" autocomplete="off" spellcheck="false">
@@ -82,6 +82,11 @@
         </div>
         <button id="lobbyLeave" class="ghost-btn small" type="button">Leave</button>
       </div>
+      <div class="level-row">
+        <span id="levelLabel" class="level-label">COURSE</span>
+        <div id="levelPick" class="level-pick" role="radiogroup" aria-label="Course"></div>
+      </div>
+      <p id="levelBlurb" class="level-blurb"></p>
       <ul id="lobbyList" class="lobby-list" aria-label="Players in this room"></ul>
       <p id="lobbyStatus" class="lobby-status" role="status"></p>
       <button id="startBtn" class="big-btn compact" type="button" hidden>START RACE</button>

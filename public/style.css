@@ -169,3 +169,13 @@ kbd {
   .lobby-card { padding: 12px 14px 12px; }
   .spec { top: 62px; font-size: 12px; }
 }
+
+/* ---------- course picker (lobby) ---------- */
+.level-row { display: flex; align-items: center; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 0 0 4px; }
+.level-label { font-size: 12px; font-weight: 600; letter-spacing: .14em; opacity: .65; }
+.level-pick { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.level-chip { padding: 4px 12px; font-size: 14px; }
+.level-chip[aria-checked="true"] { background: var(--yellow); box-shadow: 0 2px 0 var(--ink); }
+.level-chip:disabled { cursor: default; opacity: 1; }
+.level-blurb { margin: 2px 0 10px; font-size: 13px; font-weight: 500; opacity: .75; }
+@media (max-width: 640px) { .level-blurb { display: none; } }

@@ -52,7 +52,8 @@ class Room {
   pub: boolean;
   conns = new Set<Conn>();
   host: Conn | null = null;
-  world = S.createWorld();
+  world: any;                   // rebuilt whenever the lobby settles on a different course
+  levelPick = -1;               // the host's choice: a level index, or -1 for "surprise me"
   chars: any[] = [];
   phase = 0;                    // 0 lobby, 1 countdown, 2 racing, 3 results
   pt = -1;                      // seconds left on the current phase timer (-1 = none)
@@ -67,11 +68,28 @@ class Room {
   constructor(code: string, pub: boolean) {
     this.code = code;
     this.pub = pub;
+    this.setLevel(this.nextLevel());
+  }
+
+  // Build a fresh world for course `idx` (the lobby warm-up happens on its start pad).
+  setLevel(idx: number) {
+    this.world = S.createWorld(idx);
     this.world.lobby = true;
     this.world.onEvent = (type: string, ch: any, data: any) => {
       const code = EVENT_CODE[type];
       if (code) this.events.push(data === undefined ? [code, ch.id] : [code, ch.id, r2(data)]);
     };
+    for (const ch of this.chars) this.placeInLobby(ch);      // drops references to the old world's platforms
+  }
+
+  // The host's pick, otherwise a random course that differs from the last one.
+  nextLevel() {
+    const n = S.LEVELS.length;
+    if (this.levelPick >= 0 && this.levelPick < n) return this.levelPick;
+    const cur = this.world ? this.world.levelIdx : -1;
+    let i = Math.floor(Math.random() * n);
+    if (n > 1 && i === cur) i = (i + 1 + Math.floor(Math.random() * (n - 1))) % n;
+    return i;
   }
 
   humans() { return [...this.conns].filter((c) => c.ch); }
@@ -112,7 +130,7 @@ class Room {
   sendRosters() {
     const list = this.chars.map((c) => ({ i: c.id, n: c.name, c: c.color, h: c.human ? 1 : 0 }));
     for (const conn of this.conns) {
-      send(conn, { t: 'roster', you: conn.ch ? conn.ch.id : null, host: conn === this.host, code: this.code, pub: this.pub, chars: list });
+      send(conn, { t: 'roster', you: conn.ch ? conn.ch.id : null, host: conn === this.host, code: this.code, pub: this.pub, lv: this.world.levelIdx, pick: this.levelPick, chars: list });
     }
   }
 
@@ -147,12 +165,9 @@ class Room {
   }
 
   toLobby() {
-    const w = this.world;
     for (const conn of this.conns) if (!conn.ch) this.spawnHuman(conn);
     this.chars = this.chars.filter((c) => c.human);
-    S.resetWorld(w);
-    w.lobby = true;
-    for (const ch of this.chars) this.placeInLobby(ch);
+    this.setLevel(this.nextLevel());                         // a new round, possibly a new course
     this.overHandled = false; this.overT = -1;
     this.phase = 0; this.pt = this.pub ? LOBBY_WAIT : -1;
     this.sendRosters();
@@ -317,6 +332,16 @@ const server = {
         case 'start':
           if (conn.room && conn.room.host === conn && conn.room.phase === 0) conn.room.startRound();
           break;
+        case 'level': {
+          const room = conn.room;
+          if (!room || room.host !== conn || room.phase !== 0) break;
+          const i = m.i;
+          if (!Number.isInteger(i) || i < -1 || i >= S.LEVELS.length) break;      // whole numbers only; junk is ignored
+          room.levelPick = i;
+          if (i >= 0 && i !== room.world.levelIdx) room.setLevel(i);
+          room.sendRosters();
+          break;
+        }
         case 'leave': conn.room?.leave(conn); break;
         default: break;                  // 'p' keep-alive and anything unknown
       }
