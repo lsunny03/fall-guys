@@ -67,10 +67,16 @@ export function createWorld(levelIdx = 0) {
   // Register a respawn point and get its index (use it as a platform's `cp`).
   const cp = (y, z, x = 0) => { w.checkpoints.push({ x, y, z }); return w.checkpoints.length - 1; };
   // A rotating sweeper on a pillar.
-  const bar = (z, omega, phase, color, { y = 0, len = 11 } = {}) => {
-    add({ kind: 'pillar', cx: 0, cy: y + 1.4, cz: z, hx: 0.9, hy: 1.4, hz: 0.9, color: '#ffffff' });
+  // `high` adds a taller bar on the same pillar (dive-only to pass); `tall` makes the pillar 50% taller.
+  const bar = (z, omega, phase, color, { y = 0, len = 11, high = false, tall = false } = {}) => {
+    const ph = tall ? 2.1 : 1.4;
+    add({ kind: 'pillar', cx: 0, cy: y + ph, cz: z, hx: 0.9, hy: ph, hz: 0.9, color: '#ffffff' });
     const b = add({ kind: 'bar', cx: 0, cy: y + 0.75, cz: z, hx: len, hy: 0.4, hz: 0.45, hazard: true, omega, dynamic: true, color });
     b.update = (c, world) => { c.yaw = omega * world.t + phase; };
+    if (high) {
+      const h = add({ kind: 'bar', cx: 0, cy: y + 1.7, cz: z, hx: len, hy: 0.7, hz: 0.45, hazard: true, omega, dynamic: true, color });
+      h.update = b.update;
+    }
     return b;
   };
   // Move a collider back and forth along one axis: cx/cy/cz are the centre of travel, `amp` the half-travel.
@@ -137,8 +143,8 @@ export const LEVELS = [
 
       // Sweeper bars
       plat(0, 0, -31.5, 30, 41, { cp: 1, pal: ['#ffffff', '#bfe6ff'] });
-      bar(-24, 1.1, 0, '#ff5d73');
-      bar(-40, -1.35, 1.2, '#ffb703');
+      bar(-24, 1.1, 0, '#ff5d73', { high: true, tall: true });
+      bar(-40, -1.35, 1.2, '#ffb703', { tall: true });
 
       // Sliding platforms over the void
       [[-58, 6, 0.9, 0], [-67, 6.5, 1.1, 1.7], [-76, 6, 0.8, 3.1], [-85, 6.5, 1.0, 4.4]]
@@ -165,13 +171,15 @@ export const LEVELS = [
         const p = add({ kind: 'piston', cx: side * 7.5, cy: 1.6, cz: z, hx: 4, hy: 1.6, hz: 1.3, hazard: true, dynamic: true });
         p.update = (c, world, dt) => {
           const s = clamp(0.5 + 0.75 * Math.sin(world.t * f + ph), 0, 1);
-          const nx = side * (7.5 - 3.5 * s);
+          const nx = side * (7.5 - 7.5 * s);
           c.dx = nx - c.cx; c.cx = nx; c.vx = dt > 0 ? c.dx / dt : 0;
         };
       });
 
       // Stairs and the summit
       plat(0, 0, -215, 24, 18, { cp: 4, pal: ['#ffffff', '#fff3a3'] });
+      bar(-216, 1.3, 0.5, '#ff5d73', { high: true, tall: true });
+      bar(-221, -1.5, 2.0, '#ffb703', { tall: true });
       for (let i = 1; i <= 5; i++) {
         add({
           kind: 'step', cx: 0, cy: 0.45 * i, cz: -224 - 3 * (i - 1) - 1.5,
@@ -255,7 +263,7 @@ export const LEVELS = [
         const p = add({ kind: 'piston', cx: side * 8.5, cy: 1.6, cz: z, hx: 4, hy: 1.6, hz: 1.3, hazard: true, dynamic: true });
         p.update = (c, world, dt) => {
           const s = clamp(0.5 + 0.7 * Math.sin(world.t * f + ph), 0, 1);
-          const nx = side * (8.5 - 4.5 * s);
+          const nx = side * (8.5 - 8.5 * s);
           c.dx = nx - c.cx; c.cx = nx; c.vx = dt > 0 ? c.dx / dt : 0;
         };
       });
