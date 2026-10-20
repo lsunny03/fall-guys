@@ -556,7 +556,7 @@ const STATES = ['run', 'dive', 'stun', 'done'];
 const dots = new Map();
 
 // N: what the server last told us. G: purely local UI state.
-const N = { lv: 0, pick: -1, phase: -1, pt: -1, rt: 0, rtAt: 0, over: false, fin: 0, code: '', pub: false, host: false, synced: false };
+const N = { lv: 0, pick: -1, rounds: 1, round: 0, phase: -1, pt: -1, rt: 0, rtAt: 0, over: false, fin: 0, code: '', pub: false, host: false, synced: false };
 const G = { inRoom: false, shownN: 0, hintT: 0, now: 0 };
 
 function addChar(c, isMe) {
@@ -634,6 +634,7 @@ function onMessage(m) {
 
 function applyRoster(m) {
   N.host = !!m.host; N.code = m.code; N.pub = !!m.pub; N.lv = m.lv ?? 0; N.pick = m.pick ?? -1;
+  N.rounds = m.rounds ?? 1; N.round = m.rd ?? 0;
   if (loadLevel(N.lv)) { resetLocalWorld(); snapBuf.length = 0; }     // the room moved to another course
   const ids = new Set(m.chars.map((c) => c.i));
   for (const ch of [...chars]) if (!ids.has(ch.id)) removeChar(ch);
@@ -946,7 +947,29 @@ function renderLobby(list) {
   }
   $('startBtn').hidden = N.pub || !N.host;
   renderLevelPick();
+  renderRoundPick();
   updateLobbyStatus();
+}
+
+// Private rooms only: the host picks a series of 1-4 races, scored Mario Kart style by finishing place.
+function renderRoundPick() {
+  $('roundRow').hidden = N.pub;
+  $('roundBlurb').hidden = N.pub;
+  if (N.pub) return;
+  const box = $('roundPick'); box.textContent = '';
+  const canPick = N.host;
+  const items = canPick ? [1, 2, 3, 4] : [N.rounds];
+  for (const n of items) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'chip-btn level-chip'; b.textContent = String(n);
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', String(N.rounds === n));
+    if (canPick) b.addEventListener('click', () => send({ t: 'rounds', n }));
+    else b.disabled = true;
+    box.append(b);
+  }
+  $('roundLabel').textContent = canPick ? 'ROUNDS' : (N.rounds === 1 ? 'ROUND' : 'ROUNDS');
+  $('roundBlurb').textContent = N.rounds > 1 ? 'Points for every place, 15 for 1st down to 1 for 12th. Most points after the last race wins.' : 'A single race. Pick more rounds to play for points.';
 }
 
 // The host of a private room chooses the course (or leaves it on Random); everyone else just sees what's next.
@@ -975,6 +998,9 @@ function updateLobbyStatus() {
 }
 
 function showResults(m) {
+  N.round = m.rd ?? 1; N.rounds = m.rounds ?? 1;
+  const series = N.rounds > 1;
+  const finalRound = series && N.round >= N.rounds;
   const meIdx = player ? m.list.findIndex((x) => x.i === player.id) : -1;
   const me = meIdx >= 0 ? m.list[meIdx] : null;
   const made = !!(me && me.f);
@@ -985,6 +1011,16 @@ function showResults(m) {
     : made
       ? `You finished ${ord(m.list.filter((x) => x.f).findIndex((x) => x.i === me.i) + 1)} of ${TOTAL} in ${me.ft.toFixed(2)}s${me.fl ? ` · ${me.fl} fall${me.fl > 1 ? 's' : ''}` : ' · flawless run!'}`
       : `Only ${S.QUALIFY} beans can make the cut. You were ${ord(meIdx + 1)} on the course.`;
+  if (series && me) {
+    const overall = m.st.findIndex((x) => x.i === me.i);
+    const pts = overall >= 0 ? m.st[overall].p : 0;
+    $('resSub').textContent += ` · +${me.p} pts`;
+    if (finalRound && overall >= 0) {
+      title.textContent = overall === 0 ? 'CHAMPION!' : 'FINAL RESULTS';
+      title.classList.toggle('out', false);
+      $('resSub').textContent = `You placed ${ord(overall + 1)} overall with ${pts} pts after ${N.rounds} rounds.`;
+    }
+  }
   const list = $('resList'); list.textContent = '';
   m.list.forEach((x, i) => {
     const li = document.createElement('li');
@@ -995,11 +1031,32 @@ function showResults(m) {
     const nm = document.createElement('span'); nm.textContent = x.n + (x.h ? '' : ' · bot');
     const t = document.createElement('span'); t.className = 't';
     t.textContent = x.f ? `${x.ft.toFixed(2)}s` : 'DNF';
+    if (series) { const pb = document.createElement('b'); pb.textContent = `+${x.p}`; t.append(pb); }
     li.append(n, d, nm, t);
     list.append(li);
   });
+  const stand = $('resStand'); stand.textContent = '';
+  $('resStandTitle').hidden = stand.hidden = !series;
+  $('resStandTitle').textContent = finalRound ? 'FINAL STANDINGS' : `STANDINGS AFTER ROUND ${N.round}/${N.rounds}`;
+  if (series) m.st.forEach((x, i) => {
+    const li = document.createElement('li');
+    if (me && x.i === me.i) li.className = 'me';
+    const n = document.createElement('span'); n.textContent = i + 1;
+    const d = document.createElement('span'); d.className = 'dot'; d.style.background = x.c;
+    const nm = document.createElement('span'); nm.textContent = x.n;
+    const t = document.createElement('span'); t.className = 't'; t.textContent = `${x.p} pts`;
+    li.append(n, d, nm, t);
+    stand.append(li);
+  });
+  updateResNext(m.pt ?? RESULTS_WAIT);
   $('results').hidden = false;
   $('touch').hidden = true;
+}
+
+const RESULTS_WAIT = 10;
+function updateResNext(pt) {
+  const s = Math.max(0, Math.ceil(pt));
+  $('resNext').textContent = N.round < N.rounds ? `Round ${N.round + 1} of ${N.rounds} starts in ${s}s` : `Back to the lobby in ${s}s`;
 }
 
 function menuError(msg) {
@@ -1054,7 +1111,7 @@ function setPhase(m, at) {
   world.lobby = ph === 0;
   world.gate.active = ph < 2;
   if (ph === 0) updateLobbyStatus();
-  if (ph === 3) $('resNext').textContent = `Back to the lobby in ${Math.max(0, Math.ceil(m.pt))}s`;
+  if (ph === 3) updateResNext(m.pt);
 }
 
 function enterPhase(ph, prev) {
@@ -1069,7 +1126,7 @@ function enterPhase(ph, prev) {
   hud.root.hidden = ph === 0;
   $('touch').hidden = !isTouch || ph === 3;
   if (ph === 0) renderLobby(chars.filter((c) => c.human).map((c) => ({ i: c.id, n: c.name, c: c.color, h: 1 })));
-  if (ph === 1) { G.shownN = 0; G.hintT = 0; hud.hint.classList.remove('fade'); toast(world.level.name, 2800); }
+  if (ph === 1) { G.shownN = 0; G.hintT = 0; hud.hint.classList.remove('fade'); toast(N.rounds > 1 ? `Round ${N.round}/${N.rounds} · ${world.level.name}` : world.level.name, 2800); }
   if (ph === 2 && prev === 1) { banner('GO!', 'go'); sfx.go(); }
 }
 

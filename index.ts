@@ -12,6 +12,9 @@ const COUNTDOWN = 3;
 const TIME_LIMIT = 120;
 const OVER_DELAY = 2.2;      // freeze time between "race over" and the results screen
 const RESULTS_TIME = 10;
+const MAX_ROUNDS = 4;        // a private room's host can pick 1..MAX_ROUNDS races per series
+// Mario Kart style: points by finishing place (1st..12th) in each race of a series.
+const PLACE_POINTS = [15, 12, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
 const SNAP_HZ = 60;          // matches the 60 Hz room loop below; clients draw others INTERP_MS behind these
 
 const COLORS = ['#ff4d6d', '#ff9f1c', '#ffd60a', '#7bd72b', '#2ec4b6', '#3a86ff', '#8338ec', '#ff5db1', '#00bbf9', '#fb5607'];
@@ -64,6 +67,9 @@ class Room {
   snapAcc = 0;
   events: any[] = [];
   autoStart = false;
+  rounds = 1;                   // races in a series (private rooms only; the host picks)
+  round = 0;                    // which race of the series is running (0 while in the lobby)
+  totals = new Map<number, number>();   // human char id -> series points so far
 
   constructor(code: string, pub: boolean) {
     this.code = code;
@@ -130,11 +136,17 @@ class Room {
   sendRosters() {
     const list = this.chars.map((c) => ({ i: c.id, n: c.name, c: c.color, h: c.human ? 1 : 0 }));
     for (const conn of this.conns) {
-      send(conn, { t: 'roster', you: conn.ch ? conn.ch.id : null, host: conn === this.host, code: this.code, pub: this.pub, lv: this.world.levelIdx, pick: this.levelPick, chars: list });
+      send(conn, { t: 'roster', you: conn.ch ? conn.ch.id : null, host: conn === this.host, code: this.code, pub: this.pub, lv: this.world.levelIdx, pick: this.levelPick, rounds: this.rounds, rd: this.round, chars: list });
     }
   }
 
-  startRound() {
+  // From the lobby this opens a new series; `next` continues the one in progress on a fresh course.
+  startRound(next = false) {
+    if (next) {
+      for (const conn of this.conns) if (!conn.ch) this.spawnHuman(conn);
+      this.setLevel(this.nextLevel());
+      this.round++;
+    } else { this.round = 1; this.totals.clear(); }
     const w = this.world;
     for (const conn of this.conns) if (!conn.ch) this.spawnHuman(conn);
     this.chars = this.chars.filter((c) => c.human);
@@ -168,14 +180,23 @@ class Room {
     for (const conn of this.conns) if (!conn.ch) this.spawnHuman(conn);
     this.chars = this.chars.filter((c) => c.human);
     this.setLevel(this.nextLevel());                         // a new round, possibly a new course
+    this.round = 0; this.totals.clear();
     this.overHandled = false; this.overT = -1;
     this.phase = 0; this.pt = this.pub ? LOBBY_WAIT : -1;
     this.sendRosters();
   }
 
   sendResults() {
-    const list = S.rankings(this.chars).map((c: any) => ({ i: c.id, n: c.name, c: c.color, f: c.finished ? 1 : 0, ft: c.finished ? r2(c.finishT) : 0, h: c.human ? 1 : 0, fl: c.falls }));
-    this.broadcast({ t: 'results', list });
+    const list = S.rankings(this.chars).map((c: any, place: number) => {
+      const p = PLACE_POINTS[place] ?? 1;
+      if (c.human) this.totals.set(c.id, (this.totals.get(c.id) ?? 0) + p);
+      return { i: c.id, n: c.name, c: c.color, f: c.finished ? 1 : 0, ft: c.finished ? r2(c.finishT) : 0, h: c.human ? 1 : 0, fl: c.falls, p };
+    });
+    // Series standings cover the people still in the room; bots are different beans every race.
+    const st = this.rounds > 1
+      ? this.chars.filter((c) => c.human).map((c) => ({ i: c.id, n: c.name, c: c.color, p: this.totals.get(c.id) ?? 0 })).sort((a, b) => b.p - a.p)
+      : [];
+    this.broadcast({ t: 'results', list, st, rd: this.round, rounds: this.rounds });
   }
 
   broadcast(msg: unknown) {
@@ -209,7 +230,7 @@ class Room {
       }
     } else {
       this.pt -= dt;
-      if (this.pt <= 0) this.toLobby();
+      if (this.pt <= 0) { if (this.round < this.rounds) this.startRound(true); else this.toLobby(); }
     }
 
     this.snapAcc += dt;
@@ -339,6 +360,15 @@ const server = {
           if (!Number.isInteger(i) || i < -1 || i >= S.LEVELS.length) break;      // whole numbers only; junk is ignored
           room.levelPick = i;
           if (i >= 0 && i !== room.world.levelIdx) room.setLevel(i);
+          room.sendRosters();
+          break;
+        }
+        case 'rounds': {
+          const room = conn.room;
+          if (!room || room.pub || room.host !== conn || room.phase !== 0) break;
+          const n = m.n;
+          if (!Number.isInteger(n) || n < 1 || n > MAX_ROUNDS) break;
+          room.rounds = n;
           room.sendRosters();
           break;
         }

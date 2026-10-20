@@ -72,6 +72,10 @@ kbd {
 .res-list li.out { opacity: .55; }
 .res-list .dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--ink); }
 .res-list .t { font-variant-numeric: tabular-nums; font-size: 14px; opacity: .8; }
+.res-list .t b { color: var(--ink); opacity: 1; margin-left: 6px; }
+.stand-title { margin: 6px 0 4px; font-size: 13px; font-weight: 600; letter-spacing: .14em; opacity: .65; }
+.res-list.stand { max-height: 22vh; }
+.res-list.stand .t { font-size: 16px; opacity: 1; }
 
 /* ---------- HUD ---------- */
 #hud { position: fixed; inset: 0; pointer-events: none; font-weight: 700; color: #fff; text-shadow: 0 3px 0 rgba(43,27,74,.8), 0 0 12px rgba(43,27,74,.35); }

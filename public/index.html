@@ -87,6 +87,11 @@
         <div id="levelPick" class="level-pick" role="radiogroup" aria-label="Course"></div>
       </div>
       <p id="levelBlurb" class="level-blurb"></p>
+      <div id="roundRow" class="level-row" hidden>
+        <span id="roundLabel" class="level-label">ROUNDS</span>
+        <div id="roundPick" class="level-pick" role="radiogroup" aria-label="Number of rounds"></div>
+      </div>
+      <p id="roundBlurb" class="level-blurb"></p>
       <ul id="lobbyList" class="lobby-list" aria-label="Players in this room"></ul>
       <p id="lobbyStatus" class="lobby-status" role="status"></p>
       <button id="startBtn" class="big-btn compact" type="button" hidden>START RACE</button>
@@ -100,6 +105,8 @@
       <h2 id="resTitle">QUALIFIED!</h2>
       <p id="resSub" class="tag"></p>
       <ol id="resList" class="res-list"></ol>
+      <h3 id="resStandTitle" class="stand-title" hidden>SERIES STANDINGS</h3>
+      <ol id="resStand" class="res-list stand" hidden></ol>
       <p id="resNext" class="tag next"></p>
       <div class="btn-row">
         <button id="leaveBtn" class="ghost-btn" type="button">Leave room</button>
