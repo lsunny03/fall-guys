@@ -162,10 +162,10 @@ export const LEVELS = [
       plat(0, 0, -161, 24, 18, { cp: 3, pal: ['#ffffff', '#ffd6a5'] });
       plat(0, 0, -188, 6, 36, { pal: ['#ffffff', '#cdb4ff'] });
       [[-178, 1, 1.5, 0], [-188, -1, 1.6, 2.2], [-198, 1, 1.4, 4.1]].forEach(([z, side, f, ph]) => {
-        const p = add({ kind: 'piston', cx: side * 7.5, cy: 0.8, cz: z, hx: 2, hy: 0.8, hz: 1.3, hazard: true, dynamic: true });
+        const p = add({ kind: 'piston', cx: side * 7.5, cy: 1.6, cz: z, hx: 4, hy: 1.6, hz: 1.3, hazard: true, dynamic: true });
         p.update = (c, world, dt) => {
           const s = clamp(0.5 + 0.75 * Math.sin(world.t * f + ph), 0, 1);
-          const nx = side * (7.5 - 4.5 * s);
+          const nx = side * (7.5 - 3.5 * s);
           c.dx = nx - c.cx; c.cx = nx; c.vx = dt > 0 ? c.dx / dt : 0;
         };
       });
@@ -252,7 +252,7 @@ export const LEVELS = [
       // C: icy bridge with pistons that nudge you toward the edge
       plat(0, 0, -81, 12, 42, { ice: true, pal: icy('#a8d8ff') });
       [[-70, 1, 1.4, 0], [-82, -1, 1.5, 2.2], [-94, 1, 1.3, 4.1]].forEach(([z, side, f, ph]) => {
-        const p = add({ kind: 'piston', cx: side * 8.5, cy: 0.8, cz: z, hx: 2, hy: 0.8, hz: 1.3, hazard: true, dynamic: true });
+        const p = add({ kind: 'piston', cx: side * 8.5, cy: 1.6, cz: z, hx: 4, hy: 1.6, hz: 1.3, hazard: true, dynamic: true });
         p.update = (c, world, dt) => {
           const s = clamp(0.5 + 0.7 * Math.sin(world.t * f + ph), 0, 1);
           const nx = side * (8.5 - 4.5 * s);

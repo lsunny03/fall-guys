@@ -205,7 +205,7 @@ function buildCourse(w) {
         break;
       case 'piston':
         mesh = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2),
-          new THREE.MeshStandardMaterial({ map: stripeTex('#3a2a63', '#ffd23f', 2), roughness: 0.45 }));
+          new THREE.MeshStandardMaterial({ map: stripeTex('#3a2a63', '#ffd23f', 4), roughness: 0.45 }));
         break;
       case 'tile':
         mesh = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2),
