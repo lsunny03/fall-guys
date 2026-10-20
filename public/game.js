@@ -556,7 +556,7 @@ const STATES = ['run', 'dive', 'stun', 'done'];
 const dots = new Map();
 
 // N: what the server last told us. G: purely local UI state.
-const N = { lv: 0, pick: -1, rounds: 1, round: 0, phase: -1, pt: -1, rt: 0, rtAt: 0, over: false, fin: 0, code: '', pub: false, host: false, synced: false };
+const N = { lv: 0, pick: -1, rounds: 1, round: 0, mode: 'gp', out: 0, cup: null, phase: -1, pt: -1, rt: 0, rtAt: 0, over: false, fin: 0, code: '', pub: false, host: false, synced: false };
 const G = { inRoom: false, shownN: 0, hintT: 0, now: 0 };
 
 function addChar(c, isMe) {
@@ -635,6 +635,7 @@ function onMessage(m) {
 function applyRoster(m) {
   N.host = !!m.host; N.code = m.code; N.pub = !!m.pub; N.lv = m.lv ?? 0; N.pick = m.pick ?? -1;
   N.rounds = m.rounds ?? 1; N.round = m.rd ?? 0;
+  N.mode = m.mode ?? 'gp'; N.out = m.out ?? 0; N.cup = m.cup ?? null;
   if (loadLevel(N.lv)) { resetLocalWorld(); snapBuf.length = 0; }     // the room moved to another course
   const ids = new Set(m.chars.map((c) => c.i));
   for (const ch of [...chars]) if (!ids.has(ch.id)) removeChar(ch);
@@ -918,6 +919,7 @@ function updateHud(now) {
   hud.timer.textContent = Math.max(0, rt).toFixed(2);
   hud.qual.textContent = N.fin;
   hud.spec.hidden = !!player;
+  hud.spec.textContent = N.out === 1 ? 'ELIMINATED · watch the rest, you rejoin the next series' : N.out === 2 ? 'SPECTATING · you join the next series' : 'SPECTATING · you join the next round';
   for (const ch of chars) {
     let d = dots.get(ch.id);
     if (!d) {
@@ -947,6 +949,7 @@ function renderLobby(list) {
   }
   $('startBtn').hidden = N.pub || !N.host;
   renderLevelPick();
+  renderModePick();
   renderRoundPick();
   updateLobbyStatus();
 }
@@ -969,14 +972,47 @@ function renderRoundPick() {
     box.append(b);
   }
   $('roundLabel').textContent = canPick ? 'ROUNDS' : (N.rounds === 1 ? 'ROUND' : 'ROUNDS');
-  $('roundBlurb').textContent = N.rounds > 1 ? 'Points for every place, 15 for 1st down to 1 for 12th. Most points after the last race wins.' : 'A single race. Pick more rounds to play for points.';
+  $('roundBlurb').textContent = N.rounds === 1 ? 'A single race. Add rounds to play a series.' : MODES.find((x) => x.id === N.mode).blurb;
+}
+
+const MODES = [
+  { id: 'tt', label: 'Time trial', blurb: 'Your times add up across every round. Missing the cut costs the race clock plus 15s. Lowest total wins.' },
+  { id: 'gp', label: 'Grand prix', blurb: 'Sweeper, Conveyor, Slip, Sky in that order. Points for every place, 15 for 1st down to 1 for 12th. Most points wins.' },
+  { id: 'el', label: 'Elimination', blurb: 'After each race the four lowest scorers are knocked out and replaced by bots. Win the last round to win the series.' },
+];
+function renderModePick() {
+  $('modeRow').hidden = N.pub;
+  if (N.pub) return;
+  const box = $('modePick'); box.textContent = '';
+  const canPick = N.host;
+  for (const it of canPick ? MODES : MODES.filter((x) => x.id === N.mode)) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'chip-btn level-chip'; b.textContent = it.label;
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', String(N.mode === it.id));
+    if (canPick) b.addEventListener('click', () => send({ t: 'mode', m: it.id }));
+    else b.disabled = true;
+    box.append(b);
+  }
 }
 
 // The host of a private room chooses the course (or leaves it on Random); everyone else just sees what's next.
 function renderLevelPick() {
   const box = $('levelPick'); box.textContent = '';
   const lv = S.LEVELS[N.lv] || S.LEVELS[0];
-  const canPick = !N.pub && N.host;
+  const cup = !N.pub && N.mode === 'gp' && N.cup;
+  const canPick = !N.pub && N.host && !cup;
+  if (cup) {
+    for (const i of N.cup.slice(0, Math.max(1, N.rounds))) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'chip-btn level-chip'; b.textContent = S.LEVELS[i].name; b.disabled = true;
+      b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(i === N.lv));
+      box.append(b);
+    }
+    $('levelLabel').textContent = 'CUP ORDER';
+    $('levelBlurb').textContent = lv.blurb;
+    return;
+  }
   const items = canPick ? [{ i: -1, label: 'Random' }, ...S.LEVELS.map((l, i) => ({ i, label: l.name }))] : [{ i: N.lv, label: lv.name }];
   for (const it of items) {
     const b = document.createElement('button');
@@ -998,7 +1034,7 @@ function updateLobbyStatus() {
 }
 
 function showResults(m) {
-  N.round = m.rd ?? 1; N.rounds = m.rounds ?? 1;
+  N.round = m.rd ?? 1; N.rounds = m.rounds ?? 1; N.mode = m.mode ?? N.mode;
   const series = N.rounds > 1;
   const finalRound = series && N.round >= N.rounds;
   const meIdx = player ? m.list.findIndex((x) => x.i === player.id) : -1;
@@ -1007,20 +1043,39 @@ function showResults(m) {
   const title = $('resTitle');
   title.textContent = !me ? 'ROUND OVER' : made ? 'QUALIFIED!' : 'ELIMINATED';
   title.classList.toggle('out', !!me && !made);
-  $('resSub').textContent = !me ? 'Thanks for watching — you race next round.'
+  $('resSub').textContent = !me ? (N.out ? 'Thanks for watching — you join the next series.' : 'Thanks for watching — you race next round.')
     : made
       ? `You finished ${ord(m.list.filter((x) => x.f).findIndex((x) => x.i === me.i) + 1)} of ${TOTAL} in ${me.ft.toFixed(2)}s${me.fl ? ` · ${me.fl} fall${me.fl > 1 ? 's' : ''}` : ' · flawless run!'}`
       : `Only ${S.QUALIFY} beans can make the cut. You were ${ord(meIdx + 1)} on the course.`;
-  if (series && me) {
-    const overall = m.st.findIndex((x) => x.i === me.i);
-    const pts = overall >= 0 ? m.st[overall].p : 0;
-    $('resSub').textContent += ` · +${me.p} pts`;
-    if (finalRound && overall >= 0) {
-      title.textContent = overall === 0 ? 'CHAMPION!' : 'FINAL RESULTS';
-      title.classList.toggle('out', false);
-      $('resSub').textContent = `You placed ${ord(overall + 1)} overall with ${pts} pts after ${N.rounds} rounds.`;
+
+  // In a series the headline is about the series, not whether you made the top eight.
+  const timed = N.mode === 'tt';
+  const myRow = series && me ? m.st.findIndex((x) => x.i === me.i) : -1;
+  if (myRow >= 0) {
+    const row = m.st[myRow];
+    const score = timed ? `${row.tt.toFixed(2)}s total` : `${row.p} pts`;
+    const raceBit = timed ? `${me.f ? me.ft.toFixed(2) : `DNF (+${me.dt.toFixed(2)})`}s` : `+${me.p} pts`;
+    let head = null, out = false, sub;
+    if (finalRound) {
+      const win = myRow === 0;
+      head = win ? 'CHAMPION!' : 'FINAL RESULTS';
+      sub = N.mode === 'el'
+        ? (win ? 'You won the last round and the whole series!' : `You came ${ord(myRow + 1)} among the players in the last round.`)
+        : `You placed ${ord(myRow + 1)} overall with ${score} after ${N.rounds} rounds.`;
+    } else if (N.mode === 'el') {
+      out = !!row.o;
+      head = out ? 'KNOCKED OUT' : 'YOU’RE STILL IN';
+      sub = out ? 'You’re out — you’ll watch the rest of the series and rejoin the next one.'
+        : `You’re ${ord(myRow + 1)} on ${row.p} pts. ${m.st.filter((x) => x.o).length} knocked out.`;
+    } else {
+      head = `ROUND ${N.round} DONE`;
+      sub = `${raceBit} · ${ord(myRow + 1)} overall on ${score}`;
     }
+    title.textContent = head;
+    title.classList.toggle('out', out);
+    $('resSub').textContent = sub;
   }
+
   const list = $('resList'); list.textContent = '';
   m.list.forEach((x, i) => {
     const li = document.createElement('li');
@@ -1030,8 +1085,8 @@ function showResults(m) {
     const d = document.createElement('span'); d.className = 'dot'; d.style.background = x.c;
     const nm = document.createElement('span'); nm.textContent = x.n + (x.h ? '' : ' · bot');
     const t = document.createElement('span'); t.className = 't';
-    t.textContent = x.f ? `${x.ft.toFixed(2)}s` : 'DNF';
-    if (series) { const pb = document.createElement('b'); pb.textContent = `+${x.p}`; t.append(pb); }
+    t.textContent = x.f ? `${x.ft.toFixed(2)}s` : timed && series ? `DNF · ${x.dt.toFixed(2)}s` : 'DNF';
+    if (series && !timed) { const pb = document.createElement('b'); pb.textContent = `+${x.p}`; t.append(pb); }
     li.append(n, d, nm, t);
     list.append(li);
   });
@@ -1041,10 +1096,12 @@ function showResults(m) {
   if (series) m.st.forEach((x, i) => {
     const li = document.createElement('li');
     if (me && x.i === me.i) li.className = 'me';
+    if (x.o) li.classList.add('out');
     const n = document.createElement('span'); n.textContent = i + 1;
     const d = document.createElement('span'); d.className = 'dot'; d.style.background = x.c;
     const nm = document.createElement('span'); nm.textContent = x.n;
-    const t = document.createElement('span'); t.className = 't'; t.textContent = `${x.p} pts`;
+    const t = document.createElement('span'); t.className = 't';
+    t.textContent = (timed ? `${x.tt.toFixed(2)}s` : `${x.p} pts`) + (x.o ? ' · OUT' : '');
     li.append(n, d, nm, t);
     stand.append(li);
   });

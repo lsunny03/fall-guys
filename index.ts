@@ -13,6 +13,10 @@ const TIME_LIMIT = 120;
 const OVER_DELAY = 2.2;      // freeze time between "race over" and the results screen
 const RESULTS_TIME = 10;
 const MAX_ROUNDS = 4;        // a private room's host can pick 1..MAX_ROUNDS races per series
+type Mode = 'gp' | 'tt' | 'el';       // grand prix (points), time trial (total time), elimination
+const MODES: Mode[] = ['gp', 'tt', 'el'];
+const DNF_PENALTY = 15;      // time trial: a bean that misses the cut is charged the race clock plus this
+const ELIM_PER_ROUND = 4;    // elimination: lowest scorers knocked out after each race (never the whole field)
 // Mario Kart style: points by finishing place (1st..12th) in each race of a series.
 const PLACE_POINTS = [15, 12, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
 const SNAP_HZ = 60;          // matches the 60 Hz room loop below; clients draw others INTERP_MS behind these
@@ -22,6 +26,9 @@ const BOT_NAMES = ['Bean Machine', 'Jelly Roll', 'Waddles', 'Sir Bounce', 'Capâ€
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const STATE_CODE: Record<string, number> = { run: 0, dive: 1, stun: 2, done: 3 };
 const EVENT_CODE: Record<string, string> = { bonk: 'b', respawn: 'r', fall: 'f', finish: 'F', jump: 'j', dive: 'd', land: 'l' };
+
+// The grand prix always runs these courses in this order.
+const GP_ORDER = ['Sweeper', 'Conveyor', 'Slip', 'Sky'].map((k) => S.LEVELS.findIndex((l: any) => l.name.startsWith(k))).filter((i) => i >= 0);
 
 const r2 = (v: number) => Math.round(v * 100) / 100;
 const shuffle = <T>(a: T[]) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
@@ -45,6 +52,7 @@ interface Conn {
   ch: any | null;               // the bean (null while spectating)
   ct: number | null;            // client-clock stamp of the newest input
   recvAt: number;               // server ms when that input arrived
+  out: number;                  // 0 racing, 1 eliminated from the series, 2 waiting for the next series
 }
 
 let connSeq = 1;
@@ -69,12 +77,29 @@ class Room {
   autoStart = false;
   rounds = 1;                   // races in a series (private rooms only; the host picks)
   round = 0;                    // which race of the series is running (0 while in the lobby)
+  mode: Mode = 'gp';
   totals = new Map<number, number>();   // human char id -> series points so far
+  times = new Map<number, number>();    // human char id -> series total time (DNF counts as the penalty time)
+  usedLevels: number[] = [];            // courses already raced this series
 
   constructor(code: string, pub: boolean) {
     this.code = code;
     this.pub = pub;
-    this.setLevel(this.nextLevel());
+    this.rounds = pub ? 1 : GP_ORDER.length;      // private rooms default to a four-race grand prix
+    this.setLevel(this.lobbyLevel());
+  }
+
+  get series() { return !this.pub && this.rounds > 1; }
+
+  // The course the lobby warms up on: the cup opener for a grand prix, otherwise the host's pick or a random one.
+  lobbyLevel() { return !this.pub && this.mode === 'gp' ? GP_ORDER[0] : this.nextLevel(); }
+
+  // The course for the next race of a series in progress.
+  seriesLevel() {
+    if (this.mode === 'gp') return GP_ORDER[Math.min(this.round, GP_ORDER.length - 1)];
+    if (this.levelPick >= 0 && this.levelPick < S.LEVELS.length) return this.levelPick;
+    const fresh = S.LEVELS.map((_: any, i: number) => i).filter((i: number) => !this.usedLevels.includes(i));
+    return fresh.length ? fresh[Math.floor(Math.random() * fresh.length)] : this.nextLevel();
   }
 
   // Build a fresh world for course `idx` (the lobby warm-up happens on its start pad).
@@ -105,6 +130,7 @@ class Room {
     this.conns.add(conn);
     if (!this.host && !this.pub) this.host = conn;
     if (this.phase === 0) this.spawnHuman(conn);        // otherwise spectate until the next lobby
+    else if (this.series && this.mode !== 'gp') conn.out = 2;      // times and knockouts can't take a latecomer
     if (this.phase === 0 && this.pub && this.pt < 0) this.pt = LOBBY_WAIT;
     send(conn, { t: 'joined', code: this.code, pub: this.pub });
     this.sendRosters();
@@ -136,19 +162,25 @@ class Room {
   sendRosters() {
     const list = this.chars.map((c) => ({ i: c.id, n: c.name, c: c.color, h: c.human ? 1 : 0 }));
     for (const conn of this.conns) {
-      send(conn, { t: 'roster', you: conn.ch ? conn.ch.id : null, host: conn === this.host, code: this.code, pub: this.pub, lv: this.world.levelIdx, pick: this.levelPick, rounds: this.rounds, rd: this.round, chars: list });
+      send(conn, { t: 'roster', you: conn.ch ? conn.ch.id : null, host: conn === this.host, code: this.code, pub: this.pub, lv: this.world.levelIdx, pick: this.levelPick, rounds: this.rounds, rd: this.round, mode: this.mode, cup: this.mode === 'gp' ? GP_ORDER : null, out: conn.out, chars: list });
     }
   }
 
   // From the lobby this opens a new series; `next` continues the one in progress on a fresh course.
   startRound(next = false) {
     if (next) {
-      for (const conn of this.conns) if (!conn.ch) this.spawnHuman(conn);
-      this.setLevel(this.nextLevel());
+      for (const conn of this.conns) {          // knocked-out players hand their bean back to a bot
+        if (conn.out === 1 && conn.ch) { this.chars = this.chars.filter((c) => c !== conn.ch); conn.ch = null; }
+      }
+      this.setLevel(this.seriesLevel());
       this.round++;
-    } else { this.round = 1; this.totals.clear(); }
+    } else {
+      this.round = 1; this.totals.clear(); this.times.clear();
+      for (const conn of this.conns) conn.out = 0;
+    }
+    this.usedLevels = next ? [...this.usedLevels, this.world.levelIdx] : [this.world.levelIdx];
     const w = this.world;
-    for (const conn of this.conns) if (!conn.ch) this.spawnHuman(conn);
+    for (const conn of this.conns) if (!conn.ch && !conn.out) this.spawnHuman(conn);
     this.chars = this.chars.filter((c) => c.human);
     S.resetWorld(w);
     w.lobby = false;
@@ -177,26 +209,48 @@ class Room {
   }
 
   toLobby() {
+    for (const conn of this.conns) conn.out = 0;
     for (const conn of this.conns) if (!conn.ch) this.spawnHuman(conn);
     this.chars = this.chars.filter((c) => c.human);
-    this.setLevel(this.nextLevel());                         // a new round, possibly a new course
-    this.round = 0; this.totals.clear();
+    this.setLevel(this.lobbyLevel());                        // a new round, possibly a new course
+    this.round = 0; this.totals.clear(); this.times.clear(); this.usedLevels = [];
     this.overHandled = false; this.overT = -1;
     this.phase = 0; this.pt = this.pub ? LOBBY_WAIT : -1;
     this.sendRosters();
   }
 
   sendResults() {
-    const list = S.rankings(this.chars).map((c: any, place: number) => {
+    const w = this.world;
+    const ranked = S.rankings(this.chars);
+    const list = ranked.map((c: any, place: number) => {
       const p = PLACE_POINTS[place] ?? 1;
-      if (c.human) this.totals.set(c.id, (this.totals.get(c.id) ?? 0) + p);
-      return { i: c.id, n: c.name, c: c.color, f: c.finished ? 1 : 0, ft: c.finished ? r2(c.finishT) : 0, h: c.human ? 1 : 0, fl: c.falls, p };
+      const dt = c.finished ? r2(c.finishT) : r2(w.raceT + DNF_PENALTY);
+      if (c.human) {
+        this.totals.set(c.id, (this.totals.get(c.id) ?? 0) + p);
+        this.times.set(c.id, r2((this.times.get(c.id) ?? 0) + dt));
+      }
+      return { i: c.id, n: c.name, c: c.color, f: c.finished ? 1 : 0, ft: c.finished ? r2(c.finishT) : 0, h: c.human ? 1 : 0, fl: c.falls, p, dt };
     });
+
     // Series standings cover the people still in the room; bots are different beans every race.
-    const st = this.rounds > 1
-      ? this.chars.filter((c) => c.human).map((c) => ({ i: c.id, n: c.name, c: c.color, p: this.totals.get(c.id) ?? 0 })).sort((a, b) => b.p - a.p)
-      : [];
-    this.broadcast({ t: 'results', list, st, rd: this.round, rounds: this.rounds });
+    let st: any[] = [];
+    if (this.series) {
+      const final = this.round >= this.rounds;
+      const rows = ranked.filter((c: any) => c.human).map((c: any) => ({ i: c.id, n: c.name, c: c.color, p: this.totals.get(c.id) ?? 0, tt: this.times.get(c.id) ?? 0, o: 0 }));
+      // Ties keep this race's order, since the sort is stable.
+      if (this.mode === 'gp') rows.sort((a, b) => b.p - a.p);
+      else if (this.mode === 'tt') rows.sort((a, b) => a.tt - b.tt);
+      else if (!final) {
+        rows.sort((a, b) => b.p - a.p);
+        // The last scorers go out, but somebody always stays on the grid.
+        for (const r of rows.slice(rows.length - Math.min(ELIM_PER_ROUND, rows.length - 1))) {
+          r.o = 1;
+          for (const conn of this.conns) if (conn.ch && conn.ch.id === r.i) conn.out = 1;
+        }
+      }                                                  // elimination's last race: its winner takes the series
+      st = rows;
+    }
+    this.broadcast({ t: 'results', list, st, rd: this.round, rounds: this.rounds, mode: this.mode });
   }
 
   broadcast(msg: unknown) {
@@ -230,7 +284,10 @@ class Room {
       }
     } else {
       this.pt -= dt;
-      if (this.pt <= 0) { if (this.round < this.rounds) this.startRound(true); else this.toLobby(); }
+      if (this.pt <= 0) {
+        const anyoneLeft = [...this.conns].some((c) => !c.out);
+        if (this.round < this.rounds && anyoneLeft) this.startRound(true); else this.toLobby();
+      }
     }
 
     this.snapAcc += dt;
@@ -305,7 +362,10 @@ function handleJoin(conn: Conn, m: any) {
     if (!room) {
       if (rooms.size >= MAX_ROOMS) return send(conn, { t: 'err', msg: 'The servers are busy right now. Try again in a minute.' });
       room = createRoom(m.mode === 'public');
-      if (m.mode === 'solo') room.autoStart = true;
+      if (m.mode === 'solo') {                 // one quick race on a random course
+        room.autoStart = true; room.mode = 'tt'; room.rounds = 1;
+        room.setLevel(room.lobbyLevel());
+      }
     }
   }
   room.join(conn);
@@ -327,7 +387,7 @@ const server = {
   async fetch(req: Request, srv: any) {
     const url = new URL(req.url);
     if (url.pathname === '/ws') {
-      const conn: Conn = { id: connSeq++, ws: null, name: 'Player', color: COLORS[5], room: null, ch: null, ct: null, recvAt: 0 };
+      const conn: Conn = { id: connSeq++, ws: null, name: 'Player', color: COLORS[5], room: null, ch: null, ct: null, recvAt: 0, out: 0 };
       return srv.upgrade(req, { data: conn }) ? undefined : new Response('Expected a WebSocket', { status: 426 });
     }
     if (url.pathname === '/healthz') return new Response('ok');
@@ -357,9 +417,21 @@ const server = {
           const room = conn.room;
           if (!room || room.host !== conn || room.phase !== 0) break;
           const i = m.i;
+          if (room.mode === 'gp') break;                    // the grand prix sets its own courses
           if (!Number.isInteger(i) || i < -1 || i >= S.LEVELS.length) break;      // whole numbers only; junk is ignored
           room.levelPick = i;
           if (i >= 0 && i !== room.world.levelIdx) room.setLevel(i);
+          room.sendRosters();
+          break;
+        }
+        case 'mode': {
+          const room = conn.room;
+          if (!room || room.pub || room.host !== conn || room.phase !== 0) break;
+          if (!MODES.includes(m.m)) break;
+          const was = room.mode;
+          room.mode = m.m;
+          if (room.mode === 'gp' && was !== 'gp') room.rounds = GP_ORDER.length;      // a cup is four races unless trimmed
+          if ((was === 'gp') !== (room.mode === 'gp')) room.setLevel(room.lobbyLevel());      // the cup has its own opener
           room.sendRosters();
           break;
         }
@@ -368,7 +440,7 @@ const server = {
           if (!room || room.pub || room.host !== conn || room.phase !== 0) break;
           const n = m.n;
           if (!Number.isInteger(n) || n < 1 || n > MAX_ROUNDS) break;
-          room.rounds = n;
+          room.rounds = room.mode === 'gp' ? Math.min(n, GP_ORDER.length) : n;
           room.sendRosters();
           break;
         }
