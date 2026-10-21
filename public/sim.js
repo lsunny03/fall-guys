@@ -67,16 +67,15 @@ export function createWorld(levelIdx = 0) {
   // Register a respawn point and get its index (use it as a platform's `cp`).
   const cp = (y, z, x = 0) => { w.checkpoints.push({ x, y, z }); return w.checkpoints.length - 1; };
   // A rotating sweeper on a pillar.
-  // `high` adds a taller bar on the same pillar (dive-only to pass); `tall` makes the pillar 50% taller.
+  // `high` is a single taller bar (0.9–2.4 high, dive-only to pass); `tall` makes the pillar 50% taller.
   const bar = (z, omega, phase, color, { y = 0, len = 11, high = false, tall = false } = {}) => {
     const ph = tall ? 2.1 : 1.4;
     add({ kind: 'pillar', cx: 0, cy: y + ph, cz: z, hx: 0.9, hy: ph, hz: 0.9, color: '#ffffff' });
-    const b = add({ kind: 'bar', cx: 0, cy: y + 0.75, cz: z, hx: len, hy: 0.4, hz: 0.45, hazard: true, omega, dynamic: true, color });
+    const b = add({
+      kind: 'bar', cx: 0, cy: y + (high ? 1.65 : 0.75), cz: z, hx: len, hy: high ? 0.75 : 0.4, hz: 0.45,
+      hazard: true, omega, dynamic: true, color,
+    });
     b.update = (c, world) => { c.yaw = omega * world.t + phase; };
-    if (high) {
-      const h = add({ kind: 'bar', cx: 0, cy: y + 1.7, cz: z, hx: len, hy: 0.7, hz: 0.45, hazard: true, omega, dynamic: true, color });
-      h.update = b.update;
-    }
     return b;
   };
   // Move a collider back and forth along one axis: cx/cy/cz are the centre of travel, `amp` the half-travel.
@@ -178,8 +177,8 @@ export const LEVELS = [
 
       // Stairs and the summit
       plat(0, 0, -215, 24, 18, { cp: 4, pal: ['#ffffff', '#fff3a3'] });
-      bar(-216, 1.3, 0.5, '#ff5d73', { high: true, tall: true });
-      bar(-221, -1.5, 2.0, '#ffb703', { tall: true });
+      bar(-208, 1.3, 0.5, '#ff5d73', { high: true, tall: true });
+      bar(-222, -1.5, 2.0, '#ffb703', { tall: true });
       for (let i = 1; i <= 5; i++) {
         add({
           kind: 'step', cx: 0, cy: 0.45 * i, cz: -224 - 3 * (i - 1) - 1.5,
