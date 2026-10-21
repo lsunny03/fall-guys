@@ -3,6 +3,7 @@
 
 export const R = 0.42;            // bean collision radius
 export const H = 1.4;             // bean collision height
+export const DIVE_H = 0.6;        // height while diving: slides under low bars
 export const GRAVITY = 32;
 export const JUMP_V = 11.5;
 export const DIVE_V = 13.5;
@@ -408,7 +409,7 @@ function collide(w, ch, c, dt) {
   const reach = c.ext + R;
   if (dx * dx + dz * dz > reach * reach) return;
   const top = c.cy + c.hy, bot = c.cy - c.hy;
-  if (ch.y >= top || ch.y + H <= bot) return;
+  if (ch.y >= top || ch.y + (ch.state === 'dive' ? DIVE_H : H) <= bot) return;
 
   const cs = Math.cos(c.yaw), sn = Math.sin(c.yaw);
   const lx = dx * cs - dz * sn, lz = dx * sn + dz * cs;           // into box space

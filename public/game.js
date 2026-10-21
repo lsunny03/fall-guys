@@ -493,8 +493,9 @@ function animateBean(ch, v, dt, time) {
   v.legL.rotation.x = lerpTo(v.legL.rotation.x, lL, k);
   v.legR.rotation.x = lerpTo(v.legR.rotation.x, lR, k);
 
+  const crouch = ch.state === 'dive' ? 0.55 : 0;
   const stretch = clamp(ch.vy * 0.012, -0.08, 0.14) - v.squash * 0.4;
-  r.scale.set(1 - stretch * 0.5, 1 + stretch, 1 - stretch * 0.5);
+  r.scale.set(1 - stretch * 0.5 + crouch * 0.3, 1 + stretch - crouch, 1 - stretch * 0.5 + crouch * 0.3);
   // Squishy jelly bounce, scaled from the feet so it is also strongest up top.
   v.wob.scale.set(1 + wj, 1 - wj, 1 + wj);
 
