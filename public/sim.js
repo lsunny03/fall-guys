@@ -66,7 +66,8 @@ export function createWorld(levelIdx = 0) {
   const plat = (cx, top, cz, wd, dp, extra = {}) =>
     add({ cx, cy: top - 1, cz, hx: wd / 2, hy: 1, hz: dp / 2, ...extra });
   // Register a respawn point and get its index (use it as a platform's `cp`).
-  const cp = (y, z, x = 0) => { w.checkpoints.push({ x, y, z }); return w.checkpoints.length - 1; };
+  // `spread` is how wide the respawn scatter is (default 12); narrow it for checkpoints on thin decks.
+  const cp = (y, z, x = 0, spread) => { w.checkpoints.push({ x, y, z, spread }); return w.checkpoints.length - 1; };
   // A rotating sweeper on a pillar.
   // `high` is a single taller bar (0.9–2.4 high, dive-only to pass); `tall` makes the pillar 50% taller.
   const bar = (z, omega, phase, color, { y = 0, len = 11, high = false, tall = false } = {}) => {
@@ -88,32 +89,53 @@ export function createWorld(levelIdx = 0) {
     };
     return c;
   };
+  // One falling tile whose top surface sits at `top`.
+  const tile = (x, top, z, color, ice = false) => {
+    const t = add({
+      kind: 'tile', cx: x, cy: top - 0.4, cz: z, hx: 1.75, hy: 0.4, hz: 1.75,
+      dynamic: true, color, ice,
+    });
+    t.baseY = top - 0.4; t.state = 'idle'; t.timer = 0; t.fv = 0; t.pop = 1;
+    t.update = tileUpdate;
+    w.tiles.push(t);
+    return t;
+  };
   // Rows of falling tiles across six columns; one or two holes per row.
-  const tileField = (z0, rows, seed, colors, ice = false) => {
+  // opts: y = height of the tile tops, holes(k, rnd) = holes in row k, skip(k) = columns left out for something else.
+  const tileField = (z0, rows, seed, colors, ice = false, { y = 0, holes, skip } = {}) => {
     const rnd = mulberry(seed);
     const cols = [-9.5, -5.7, -1.9, 1.9, 5.7, 9.5];
     for (let k = 0; k < rows; k++) {
-      const missing = new Set();
-      const nMiss = 1 + (rnd() < 0.5 ? 1 : 0);
-      while (missing.size < nMiss) missing.add(Math.floor(rnd() * cols.length));
+      const missing = new Set(skip ? skip(k) : []);
+      const target = missing.size + (holes ? holes(k, rnd) : 1 + (rnd() < 0.5 ? 1 : 0));
+      while (missing.size < target) missing.add(Math.floor(rnd() * cols.length));
       cols.forEach((x, i) => {
-        if (missing.has(i)) return;
-        const t = add({
-          kind: 'tile', cx: x, cy: -0.4, cz: z0 - 4 * k, hx: 1.75, hy: 0.4, hz: 1.75,
-          dynamic: true, color: colors[(i + k) % colors.length], ice,
-        });
-        t.baseY = -0.4; t.state = 'idle'; t.timer = 0; t.fv = 0; t.pop = 1;
-        t.update = tileUpdate;
-        w.tiles.push(t);
+        if (!missing.has(i)) tile(x, y, z0 - 4 * k, colors[(i + k) % colors.length], ice);
       });
     }
+  };
+  // A side piston that slides along X: `from` is its centre at rest, `to` its centre fully out (both signed by `side`).
+  const piston = (z, side, f, ph, { from, to, hx = 4, y = 0, amp = 0.75, hy = 1.6 }) => {
+    const p = add({ kind: 'piston', cx: side * from, cy: y + hy, cz: z, hx, hy, hz: 1.3, hazard: true, dynamic: true });
+    p.update = (c, world, dt) => {
+      const s = clamp(0.5 + amp * Math.sin(world.t * f + ph), 0, 1);
+      const nx = side * (from + (to - from) * s);
+      c.dx = nx - c.cx; c.cx = nx; c.vx = dt > 0 ? c.dx / dt : 0;
+    };
+    return p;
+  };
+  // A platform that slides sideways over the void (bots chase these through w.movers).
+  const slider = (z, amp, f, ph, pal, { wd = 7, dp = 7, x = 0, top = 0 } = {}) => {
+    const c = osc(plat(x, top, z, wd, dp, { kind: 'mover', pal }), 'x', amp, f, ph);
+    w.movers.push(c);
+    return c;
   };
 
   // Shared start pad (+ the gate that drops on GO). Every level starts here, so the lobby is the same everywhere.
   plat(0, 0, 8, 30, 32, { cp: 0, pal: ['#ffffff', '#ffc2dc'], label: 'start' });
   w.gate = add({ kind: 'gate', cx: 0, cy: 1.5, cz: 12.5, hx: 15, hy: 1.5, hz: 0.4 });
 
-  lv.build(w, { add, plat, cp, bar, osc, tileField });
+  lv.build(w, { add, plat, cp, bar, osc, tileField, tile, piston, slider });
 
   resetWorld(w);
   return w;
@@ -122,11 +144,35 @@ export function createWorld(levelIdx = 0) {
 /* ------------------------------------------------------------------ */
 /* Levels                                                              */
 /* ------------------------------------------------------------------ */
-// build(w, kit)  lays out everything beyond the start pad (kit = add, plat, cp, bar, osc, tileField).
+// build(w, kit)  lays out everything beyond the start pad (kit = add, plat, cp, bar, osc, tileField, tile, piston, slider).
 // finish         {z, y}: crossing z while standing at height >= y-1 qualifies (y is the summit's top).
 // ai(w, ch, b)   optional steering hint for bots: {tx, tz?} = where to aim instead of their usual lane.
 // theme          colours and scenery style for the renderer.
 const lanes = (b, k) => b.lane * k;
+
+// Bot steering for rows of sliding platforms: aim at the one in the next row that sits closest to us.
+function chaseMover(w, ch) {
+  const from = ch.ground && ch.ground.kind === 'mover' ? ch.ground.cz - 1 : ch.z - 1;
+  let nz = -Infinity;
+  for (const p of w.movers) if (p.cz < from && p.cz > nz) nz = p.cz;
+  if (nz < from - 8) return null;                     // nothing close enough: run on as usual
+  let best = null;
+  for (const p of w.movers) {
+    if (Math.abs(p.cz - nz) < 0.5 && (!best || Math.abs(p.cx - ch.x) < Math.abs(best.cx - ch.x))) best = p;
+  }
+  return { tx: best.cx + best.vx * 0.3, tz: best.cz };
+}
+
+// Bot steering for a staircase whose steps come in pieces: aim at the nearest piece of the next step.
+function chaseStep(w, ch) {
+  let nz = -Infinity;
+  for (const c of w.colliders) if (c.kind === 'step' && c.cz < ch.z - 1 && c.cz > nz) nz = c.cz;
+  let best = null;
+  for (const c of w.colliders) {
+    if (c.kind === 'step' && Math.abs(c.cz - nz) < 0.5 && (!best || Math.abs(c.cx - ch.x) < Math.abs(best.cx - ch.x))) best = c;
+  }
+  return best ? { tx: best.cx, tz: best.cz } : null;
+}
 
 export const LEVELS = [
   {
@@ -314,6 +360,156 @@ export const LEVELS = [
       return { tx: lanes(b, 0.4) };
     },
   },
+
+  {
+    id: 'fallzone',
+    name: 'Fall Zone',
+    blurb: 'Dodge sweepers and pistons while the floor drops out from under you, then climb the stairs for a last tile run.',
+    finish: { z: -204, y: 3.6 },
+    theme: {
+      sky: ['#2fc9a0', '#b4f2cf', '#fff1b0'], fog: '#d6f7c8', ground: '#a6e58c', goo: '#ff8a3d', gooGlow: '#7a2e08',
+      pastel: ['#9be564', '#ffe08a', '#ff9ec7', '#8ecae6', '#d9c2ff', '#ffc8a2'], scenery: 'box',
+    },
+    build(w, { add, plat, cp, bar, tileField, piston }) {
+      // A: sweepers over falling tiles. Each pillar stands on a solid block that replaces the two centre tiles of its row.
+      const SWEEP_ROWS = [2, 5, 8, 11];
+      tileField(-10, 14, 31, ['#ff6b9d', '#ffd23f', '#3bceac', '#4ea8de'], false, {
+        holes: () => 0, skip: (k) => (SWEEP_ROWS.includes(k) ? [2, 3] : []),
+      });
+      const bars = [[1.1, 0, '#ff5d73', false], [-1.3, 1.2, '#ffb703', true], [1.4, 2.4, '#ff5d73', false], [-1.5, 0.7, '#ffb703', false]];
+      SWEEP_ROWS.forEach((k, i) => {
+        const z = -10 - 4 * k, [om, ph, col, high] = bars[i];
+        plat(0, 0, z, 7.3, 3.5, { pal: ['#ffffff', '#bfe6ff'], cp: i % 2 ? cp(0, z) : undefined });
+        bar(z, om, ph, col, { high, tall: high });
+      });
+      plat(0, 0, -70, 30, 12, { cp: cp(0, -69), pal: ['#ffffff', '#c8f2a0'] });
+
+      // B: pistons shoving beans around on falling tiles (pistons sit on the odd rows, holes on the even ones)
+      tileField(-78, 12, 47, ['#ffb3d1', '#b8e0ff', '#ffe08a', '#c8f2a0'], false, {
+        holes: (k, rnd) => (k % 2 ? 0 : 1 + (rnd() < 0.3 ? 1 : 0)),
+      });
+      [1, 3, 5, 7, 9, 11].forEach((k, i) => {
+        piston(-78 - 4 * k, i % 2 ? -1 : 1, 1.35 + (i % 3) * 0.12, i * 1.9, { from: 15.4, to: 5 });
+      });
+      plat(0, 0, -131, 30, 14, { cp: cp(0, -129), pal: ['#ffffff', '#ffd6a5'] });
+
+      // C: stairs up, then a plain falling-tile run at the top
+      for (let i = 1; i <= 4; i++) {
+        add({
+          kind: 'step', cx: 0, cy: 0.45 * i, cz: -138 - 3 * (i - 1) - 1.5,
+          hx: 9, hy: 0.45 * i, hz: 1.5, pal: ['#ffffff', ['#ff9ec7', '#ffd166', '#9be564', '#8ecae6'][i - 1]],
+        });
+      }
+      plat(0, 3.6, -156, 26, 12, { cp: cp(3.6, -153), pal: ['#ffffff', '#fff3a3'] });
+      tileField(-164, 9, 59, ['#ff9e7a', '#ffd23f', '#9be564', '#6ec3ff'], false, { y: 3.6 });
+      plat(0, 3.6, -206, 22, 16, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      const z = ch.z;
+      if (z < -76 && z > -126) return { tx: Math.sin(w.t * b.nf + b.np) * 5 };   // weave between the pistons
+      if (z < -138 && z > -152) return { tx: 0 };
+      return { tx: lanes(b, 0.5) };
+    },
+  },
+
+  {
+    id: 'froggier',
+    name: 'Froggier',
+    blurb: 'Hop across lanes of sliding platforms, with piston gauntlets to survive in between.',
+    finish: { z: -208, y: 0 },
+    theme: {
+      sky: ['#1fb6a6', '#9fe8c8', '#eaffc4'], fog: '#c9f2d3', ground: '#7fd69e', goo: '#4cc96a', gooGlow: '#0f4a2a',
+      pastel: ['#b6f08a', '#8ee3c8', '#ffe27a', '#ffb3c7', '#bfe8ff', '#d9c2ff'], scenery: 'pillar',
+    },
+    build(w, { plat, cp, slider, piston }) {
+      const pad = (c) => ['#ffffff', c];
+      // `lanes` rows of platforms, 7 m apart, `n` per row sliding in opposite directions. The first row is centred at z.
+      const road = (z, n, amp, wd, f0, seed, tint) => {
+        for (let i = 0; i < n; i++) {
+          const f = f0 + (i % 3) * 0.14, ph = i * 1.7 + seed;
+          for (const half of [0, 1]) slider(z - 7 * i, amp, f * (i % 2 ? -1 : 1), ph + half * 2.5, pad(tint[(i + half) % tint.length]), { wd, dp: 4 });
+        }
+      };
+      const bridge = (z, cpz, specs) => {
+        plat(0, 0, z, 16, 40, { cp: cp(0, cpz), pal: pad('#ffe3a3') });
+        specs.forEach(([pz, side, f, ph]) => piston(pz, side, f, ph, { from: 12.3, to: 4 }));
+      };
+      road(-13, 4, 8, 6, 0.75, 0, ['#ffd166', '#8ecae6', '#9be564', '#ff9ec7']);
+      bridge(-59, -42, [[-47, 1, 1.4, 0], [-55, -1, 1.5, 2.2], [-63, 1, 1.45, 4.1], [-71, -1, 1.55, 1.0]]);
+      road(-84, 5, 9, 5.5, 0.9, 1.1, ['#8ecae6', '#ffd166', '#ff9ec7', '#9be564']);
+      bridge(-137, -120, [[-124, -1, 1.6, 0.5], [-131, 1, 1.7, 2.6], [-138, -1, 1.55, 4.4], [-145, 1, 1.75, 0.9], [-152, -1, 1.65, 3.3]]);
+      road(-162, 6, 10, 5, 1.0, 2.3, ['#9be564', '#ff9ec7', '#ffd166', '#8ecae6']);
+      plat(0, 0, -210, 24, 16, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      const z = ch.z;
+      const lane = (z < -8 && z > -40) || (z < -80 && z > -118) || (z < -157 && z > -200);
+      if (lane && ch.y > -3) return chaseMover(w, ch);
+      if ((z < -40 && z > -80) || (z < -118 && z > -157)) return { tx: Math.sin(w.t * b.nf + b.np) * 6 };
+      return { tx: lanes(b, 0.4) };
+    },
+  },
+
+  {
+    id: 'zigzags',
+    name: 'Zigzags',
+    blurb: 'Squeeze past a piston wall, ride the sliders, dash a thin sweeper bridge, then zigzag up a split staircase.',
+    finish: { z: -253, y: 8.1 },
+    theme: {
+      sky: ['#2b2f8f', '#7d78e6', '#ffd0ee'], fog: '#d4cbf7', ground: '#8f9be8', goo: '#b56bff', gooGlow: '#3b1a6e',
+      pastel: ['#ff9ec7', '#9be0ff', '#ffe08a', '#c8f2a0', '#d9c2ff', '#ffb677'], scenery: 'cone',
+    },
+    build(w, { add, plat, cp, bar, slider, piston }) {
+      const sky = (c) => ['#ffffff', c];
+      // A: the piston wall. No floor down the middle, just a strip on each side; the pistons slam out of the central void.
+      [[23, -19.5, -12], [21, -41.5, -35]].forEach(([dp, cz, cpz]) => {
+        for (const side of [-1, 1]) plat(side * 8, 0, cz, 7, dp, { cp: cp(0, cpz, side * 8, 5), pal: sky(side < 0 ? '#ffc2dc' : '#bfe6ff') });
+      });
+      [-18, -26, -34, -42, -50].forEach((z, i) => {
+        const f = 1.25 + (i % 3) * 0.12, ph = i * 1.35;
+        piston(z, 1, f, ph, { from: 0.7, to: 8, hx: 3.5, amp: 0.8 });
+        piston(z, -1, f, ph, { from: 0.7, to: 8, hx: 3.5, amp: 0.8, hy: 1.55 });     // a hair lower so the two tops never z-fight
+      });
+      plat(0, 0, -57, 26, 10, { cp: cp(0, -54), pal: sky('#ffe3a3') });
+
+      // B: sliders that cross over in the middle
+      [0.8, 0.9, 0.85, 0.95].forEach((f, i) => {
+        slider(-67.5 - 9 * i, 6.5, f, [0, 3.4, 0.6, 4.0][i], sky(['#ffd166', '#8ecae6', '#9be564', '#ff9ec7'][i]), { wd: 8, dp: 7 });
+      });
+      plat(0, 0, -105, 26, 10, { cp: cp(0, -103), pal: sky('#c8f2a0') });
+
+      // C: thin sweeper bridge
+      plat(0, 0, -134, 8, 48, { pal: sky('#ffc2dc') });
+      bar(-123, 1.8, 0, '#ff5d73', { len: 7 });
+      bar(-135, -2.0, 1.0, '#ffb703', { len: 7 });
+      bar(-147, 2.2, 2.0, '#ff5d73', { len: 7 });
+      plat(0, 0, -163, 26, 10, { cp: cp(0, -161), pal: sky('#cdb4ff') });
+
+      // D: faster sliders
+      [1.0, 1.15, 1.05, 1.2, 1.1].forEach((f, i) => {
+        slider(-173 - 8 * i, 7, f, [0, 3.5, 1.0, 4.3, 2.0][i], sky(['#8ecae6', '#ffd166', '#ff9ec7', '#9be564', '#cdb4ff'][i]), { wd: 7, dp: 6 });
+      });
+      plat(0, 0, -216, 26, 12, { cp: cp(0, -213), pal: sky('#ffd6a5') });
+
+      // E: the stairs start in the middle, split to the two sides (nothing in the centre), then merge again
+      const gaps = [0, 0, 5, 9, 12, 9, 5, 0, 0];
+      const tint = ['#ff9ec7', '#ffd166', '#9be564', '#8ecae6', '#cdb4ff'];
+      gaps.forEach((g, k) => {
+        const i = k + 1, cz = -222 - 3 * k - 1.5;
+        const xs = g === 0 ? [[0, 7]] : [[-(g / 2 + 3.5), 3.5], [g / 2 + 3.5, 3.5]];
+        for (const [x, hx] of xs) add({ kind: 'step', cx: x, cy: 0.45 * i, cz, hx, hy: 0.45 * i, hz: 1.5, pal: ['#ffffff', tint[k % tint.length]] });
+      });
+      plat(0, 8.1, -257, 22, 16, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      const z = ch.z;
+      if (z < -8 && z > -54) return { tx: b.lane < 0 ? -8 : 8 };                       // stick to one strip
+      if ((z < -60 && z > -102) || (z < -167 && z > -210)) return chaseMover(w, ch);
+      if (z < -108 && z > -160) return { tx: Math.sin(w.t * b.nf + b.np) * 0.6 };
+      if (z < -210 && z > -254) return chaseStep(w, ch);
+      return { tx: lanes(b, 0.4) };
+    },
+  },
 ];
 
 function tileUpdate(c, w, dt) {
@@ -393,7 +589,7 @@ export function stun(w, ch, time) {
 
 function respawn(w, ch) {
   const cp = w.checkpoints[ch.cp];
-  ch.x = cp.x + (Math.random() - 0.5) * 12;
+  ch.x = cp.x + (Math.random() - 0.5) * (cp.spread ?? 12);
   ch.z = cp.z - 1 + Math.random() * 2;
   ch.y = cp.y + 1.5;
   ch.vx = ch.vy = ch.vz = 0;
