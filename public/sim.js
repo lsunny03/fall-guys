@@ -496,7 +496,7 @@ export const LEVELS = [
       const tint = ['#ff9ec7', '#ffd166', '#9be564', '#8ecae6', '#cdb4ff'];
       gaps.forEach((g, k) => {
         const i = k + 1, cz = -222 - 3 * k - 1.5;
-        const xs = g === 0 ? [[0, 7]] : [[-(g / 2 + 3.5), 3.5], [g / 2 + 3.5, 3.5]];
+        const xs = g === 0 ? [[0, 4.9]] : [[-(g / 2 + 2.45), 2.45], [g / 2 + 2.45, 2.45]];
         for (const [x, hx] of xs) add({ kind: 'step', cx: x, cy: 0.45 * i, cz, hx, hy: 0.45 * i, hz: 1.5, pal: ['#ffffff', tint[k % tint.length]] });
       });
       plat(0, 8.1, -257, 22, 16, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
@@ -522,7 +522,7 @@ export const LEVELS = [
     },
     build(w, { add, cp, bar, piston }) {
       // Everything is one stairway: `n` counts the rises so far, so the surface under us is always RISE * n high.
-      const RISE = 0.45, DP = 3, W = 8;
+      const RISE = 0.45, DP = 3, W = 5.6, HALF = 2.8;
       const tints = ['#ff9ec7', '#ffd166', '#9be564', '#8ecae6', '#cdb4ff'];
       let z = -8, n = 0, tintI = 0;
       const top = () => RISE * n;
@@ -567,7 +567,7 @@ export const LEVELS = [
       // 3: the stairs split into two halves with nothing between them, then come back together
       zones.split = [z];
       [0, 2.5, 5, 8, 10, 12, 12, 10, 8, 5, 2.5, 0].forEach((g) => {
-        rise(g === 0 ? [[0, W]] : [[-(g / 2 + 4), 4], [g / 2 + 4, 4]]);
+        rise(g === 0 ? [[0, W]] : [[-(g / 2 + HALF), HALF], [g / 2 + HALF, HALF]]);
       });
       zones.split.push(z);
       rest();
