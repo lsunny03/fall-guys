@@ -556,7 +556,7 @@ const STATES = ['run', 'dive', 'stun', 'done'];
 const dots = new Map();
 
 // N: what the server last told us. G: purely local UI state.
-const N = { lv: 0, pick: -1, rounds: 1, round: 0, mode: 'gp', out: 0, cup: null, phase: -1, pt: -1, rt: 0, rtAt: 0, over: false, fin: 0, code: '', pub: false, host: false, synced: false };
+const N = { lv: 0, pick: -1, rounds: 1, round: 0, mode: 'gp', out: 0, cup: null, cups: [], cn: 0, phase: -1, pt: -1, rt: 0, rtAt: 0, over: false, fin: 0, code: '', pub: false, host: false, synced: false };
 const G = { inRoom: false, shownN: 0, hintT: 0, now: 0 };
 
 function addChar(c, isMe) {
@@ -635,7 +635,7 @@ function onMessage(m) {
 function applyRoster(m) {
   N.host = !!m.host; N.code = m.code; N.pub = !!m.pub; N.lv = m.lv ?? 0; N.pick = m.pick ?? -1;
   N.rounds = m.rounds ?? 1; N.round = m.rd ?? 0;
-  N.mode = m.mode ?? 'gp'; N.out = m.out ?? 0; N.cup = m.cup ?? null;
+  N.mode = m.mode ?? 'gp'; N.out = m.out ?? 0; N.cup = m.cup ?? null; N.cups = m.cups ?? []; N.cn = m.cn ?? 0;
   if (loadLevel(N.lv)) { resetLocalWorld(); snapBuf.length = 0; }     // the room moved to another course
   const ids = new Set(m.chars.map((c) => c.i));
   for (const ch of [...chars]) if (!ids.has(ch.id)) removeChar(ch);
@@ -948,6 +948,7 @@ function renderLobby(list) {
     ul.append(li);
   }
   $('startBtn').hidden = N.pub || !N.host;
+  renderCupPick();
   renderLevelPick();
   renderModePick();
   renderRoundPick();
@@ -977,7 +978,7 @@ function renderRoundPick() {
 
 const MODES = [
   { id: 'tt', label: 'Time trial', blurb: 'Your times add up across every round. Missing the cut costs the race clock plus 15s. Lowest total wins.' },
-  { id: 'gp', label: 'Grand prix', blurb: 'Sweeper, Conveyor, Slip, Sky in that order. Points for every place, 15 for 1st down to 1 for 12th. Most points wins.' },
+  { id: 'gp', label: 'Grand prix', blurb: 'Pick a cup and race its courses in order. Points for every place, 15 for 1st down to 1 for 12th. Most points wins.' },
   { id: 'el', label: 'Elimination', blurb: 'After each race the four lowest scorers are knocked out and replaced by bots. Win the last round to win the series.' },
 ];
 function renderModePick() {
@@ -994,6 +995,24 @@ function renderModePick() {
     else b.disabled = true;
     box.append(b);
   }
+}
+
+// Grand prix only: the host picks which cup (set of four courses) to run.
+function renderCupPick() {
+  const show = !N.pub && N.mode === 'gp' && N.cups.length > 1;
+  $('cupRow').hidden = !show;
+  if (!show) return;
+  const box = $('cupPick'); box.textContent = '';
+  const canPick = N.host;
+  N.cups.forEach((name, i) => {
+    if (!canPick && i !== N.cn) return;
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'chip-btn level-chip'; b.textContent = name;
+    b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(i === N.cn));
+    if (canPick) b.addEventListener('click', () => send({ t: 'cup', i }));
+    else b.disabled = true;
+    box.append(b);
+  });
 }
 
 // The host of a private room chooses the course (or leaves it on Random); everyone else just sees what's next.

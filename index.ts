@@ -27,8 +27,11 @@ const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const STATE_CODE: Record<string, number> = { run: 0, dive: 1, stun: 2, done: 3 };
 const EVENT_CODE: Record<string, string> = { bonk: 'b', respawn: 'r', fall: 'f', finish: 'F', jump: 'j', dive: 'd', land: 'l' };
 
-// The grand prix always runs these courses in this order.
-const GP_ORDER = ['Sweeper', 'Conveyor', 'Slip', 'Sky'].map((k) => S.LEVELS.findIndex((l: any) => l.name.startsWith(k))).filter((i) => i >= 0);
+// Grand prix cups: each runs its courses in this order. The host of a private room picks the cup.
+const CUPS = [
+  { name: 'Classic Cup', courses: ['Sweeper', 'Conveyor', 'Slip', 'Sky'] },
+  { name: 'Fall Cup', courses: ['Fall Zone', 'Froggier', 'Zigzags', 'The Great Climb'] },
+].map((c) => ({ name: c.name, order: c.courses.map((k) => S.LEVELS.findIndex((l: any) => l.name.startsWith(k))).filter((i) => i >= 0) }));
 
 const r2 = (v: number) => Math.round(v * 100) / 100;
 const shuffle = <T>(a: T[]) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
@@ -78,6 +81,7 @@ class Room {
   rounds = 1;                   // races in a series (private rooms only; the host picks)
   round = 0;                    // which race of the series is running (0 while in the lobby)
   mode: Mode = 'gp';
+  cupIdx = 0;                   // which grand prix cup the host picked
   totals = new Map<number, number>();   // human char id -> series points so far
   times = new Map<number, number>();    // human char id -> series total time (DNF counts as the penalty time)
   usedLevels: number[] = [];            // courses already raced this series
@@ -85,18 +89,19 @@ class Room {
   constructor(code: string, pub: boolean) {
     this.code = code;
     this.pub = pub;
-    this.rounds = pub ? 1 : GP_ORDER.length;      // private rooms default to a four-race grand prix
+    this.rounds = pub ? 1 : CUPS[0].order.length;      // private rooms default to a four-race grand prix
     this.setLevel(this.lobbyLevel());
   }
 
   get series() { return !this.pub && this.rounds > 1; }
+  get cupOrder(): number[] { return CUPS[this.cupIdx].order; }
 
   // The course the lobby warms up on: the cup opener for a grand prix, otherwise the host's pick or a random one.
-  lobbyLevel() { return !this.pub && this.mode === 'gp' ? GP_ORDER[0] : this.nextLevel(); }
+  lobbyLevel() { return !this.pub && this.mode === 'gp' ? this.cupOrder[0] : this.nextLevel(); }
 
   // The course for the next race of a series in progress.
   seriesLevel() {
-    if (this.mode === 'gp') return GP_ORDER[Math.min(this.round, GP_ORDER.length - 1)];
+    if (this.mode === 'gp') return this.cupOrder[Math.min(this.round, this.cupOrder.length - 1)];
     if (this.levelPick >= 0 && this.levelPick < S.LEVELS.length) return this.levelPick;
     const fresh = S.LEVELS.map((_: any, i: number) => i).filter((i: number) => !this.usedLevels.includes(i));
     return fresh.length ? fresh[Math.floor(Math.random() * fresh.length)] : this.nextLevel();
@@ -162,7 +167,7 @@ class Room {
   sendRosters() {
     const list = this.chars.map((c) => ({ i: c.id, n: c.name, c: c.color, h: c.human ? 1 : 0 }));
     for (const conn of this.conns) {
-      send(conn, { t: 'roster', you: conn.ch ? conn.ch.id : null, host: conn === this.host, code: this.code, pub: this.pub, lv: this.world.levelIdx, pick: this.levelPick, rounds: this.rounds, rd: this.round, mode: this.mode, cup: this.mode === 'gp' ? GP_ORDER : null, out: conn.out, chars: list });
+      send(conn, { t: 'roster', you: conn.ch ? conn.ch.id : null, host: conn === this.host, code: this.code, pub: this.pub, lv: this.world.levelIdx, pick: this.levelPick, rounds: this.rounds, rd: this.round, mode: this.mode, cup: this.mode === 'gp' ? this.cupOrder : null, cups: CUPS.map((c) => c.name), cn: this.cupIdx, out: conn.out, chars: list });
     }
   }
 
@@ -430,8 +435,18 @@ const server = {
           if (!MODES.includes(m.m)) break;
           const was = room.mode;
           room.mode = m.m;
-          if (room.mode === 'gp' && was !== 'gp') room.rounds = GP_ORDER.length;      // a cup is four races unless trimmed
+          if (room.mode === 'gp' && was !== 'gp') room.rounds = room.cupOrder.length;      // a cup is four races unless trimmed
           if ((was === 'gp') !== (room.mode === 'gp')) room.setLevel(room.lobbyLevel());      // the cup has its own opener
+          room.sendRosters();
+          break;
+        }
+        case 'cup': {
+          const room = conn.room;
+          if (!room || room.pub || room.host !== conn || room.phase !== 0 || room.mode !== 'gp') break;
+          if (!Number.isInteger(m.i) || m.i < 0 || m.i >= CUPS.length) break;
+          room.cupIdx = m.i;
+          room.rounds = Math.min(room.rounds, room.cupOrder.length);
+          room.setLevel(room.lobbyLevel());
           room.sendRosters();
           break;
         }
@@ -440,7 +455,7 @@ const server = {
           if (!room || room.pub || room.host !== conn || room.phase !== 0) break;
           const n = m.n;
           if (!Number.isInteger(n) || n < 1 || n > MAX_ROUNDS) break;
-          room.rounds = room.mode === 'gp' ? Math.min(n, GP_ORDER.length) : n;
+          room.rounds = room.mode === 'gp' ? Math.min(n, room.cupOrder.length) : n;
           room.sendRosters();
           break;
         }
