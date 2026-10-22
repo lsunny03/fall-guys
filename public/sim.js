@@ -510,6 +510,92 @@ export const LEVELS = [
       return { tx: lanes(b, 0.4) };
     },
   },
+
+  {
+    id: 'climb',
+    name: 'The Great Climb',
+    blurb: 'One long stairway to the sky: sweepers built into the steps, a staircase that splits and rejoins, then pistons on the stairs.',
+    finish: { z: -294, y: 34.65 },
+    theme: {
+      sky: ['#ff9a5c', '#ffd07a', '#fff2c9'], fog: '#ffe2b0', ground: '#ffc98a', goo: '#ff6b6b', gooGlow: '#7a1f2e',
+      pastel: ['#ffd1a1', '#ffb3c7', '#ffe08a', '#c8f2a0', '#bfe8ff', '#d9c2ff'], scenery: 'pillar',
+    },
+    build(w, { add, cp, bar, piston }) {
+      // Everything is one stairway: `n` counts the rises so far, so the surface under us is always RISE * n high.
+      const RISE = 0.45, DP = 3, W = 8;
+      const tints = ['#ff9ec7', '#ffd166', '#9be564', '#8ecae6', '#cdb4ff'];
+      let z = -8, n = 0, tintI = 0;
+      const top = () => RISE * n;
+      // A solid block from the ground up to the current height, `dp` deep, starting at z.
+      const box = (x, hx, dp, extra = {}) => add({
+        kind: 'step', cx: x, cy: top() / 2, cz: z - dp / 2, hx, hy: top() / 2, hz: dp / 2,
+        pal: ['#ffffff', tints[tintI % tints.length]], ...extra,
+      });
+      // One step up made of one or more pieces ([centre x, half width]).
+      const rise = (pieces) => {
+        n++;
+        for (const [x, hx] of pieces) box(x, hx, DP);
+        z -= DP; tintI++;
+      };
+      const flight = (count) => { for (let i = 0; i < count; i++) rise([[0, W]]); };
+      // A flat landing as deep as `dp`; returns its centre z and the height it sits at.
+      const landing = (dp, extra) => {
+        n++;
+        const c = { z: z - dp / 2, y: top() };
+        box(0, W, dp, extra && extra(c));
+        z -= dp; tintI++;
+        return c;
+      };
+      const rest = () => landing(8, (c) => ({ cp: cp(c.y, c.z) }));
+      const zones = (w.zones = {});
+
+      // 1: a plain flight
+      flight(14);
+      rest();
+
+      // 2: sweepers set into landings along the flight (the high one has to be dived under)
+      zones.sweep = [z];
+      [[1.3, 0, '#ff5d73', false], [-1.5, 1.2, '#ffb703', true], [1.7, 2.4, '#ff5d73', false]].forEach(([om, ph, col, high]) => {
+        flight(4);
+        const c = landing(14);
+        bar(c.z, om, ph, col, { y: c.y, len: 7, high, tall: high });
+      });
+      flight(3);
+      zones.sweep.push(z);
+      rest();
+
+      // 3: the stairs split into two halves with nothing between them, then come back together
+      zones.split = [z];
+      [0, 2.5, 5, 8, 10, 12, 12, 10, 8, 5, 2.5, 0].forEach((g) => {
+        rise(g === 0 ? [[0, W]] : [[-(g / 2 + 4), 4], [g / 2 + 4, 4]]);
+      });
+      zones.split.push(z);
+      rest();
+
+      // 4: pistons on the stairs, alternating sides
+      zones.piston = [z];
+      for (let i = 0; i < 14; i++) {
+        rise([[0, W]]);
+        if (i % 2) {
+          const k = (i - 1) / 2;
+          piston(z + DP / 2, k % 2 ? -1 : 1, 1.3 + (k % 3) * 0.12, k * 1.9, { from: W + 4, to: 4, y: top() });
+        }
+      }
+      zones.piston.push(z);
+      rest();
+
+      // 5: the last flight and the summit
+      flight(14);
+      n++;
+      box(0, 11, 16, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      const z = ch.z, zn = w.zones;
+      if (z < zn.split[0] && z > zn.split[1]) return chaseStep(w, ch);
+      if (z < zn.piston[0] && z > zn.piston[1]) return { tx: Math.sin(w.t * b.nf + b.np) * 4 };
+      return { tx: lanes(b, 0.5) };
+    },
+  },
 ];
 
 function tileUpdate(c, w, dt) {
