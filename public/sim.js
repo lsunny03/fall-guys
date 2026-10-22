@@ -664,6 +664,7 @@ export function initBot(ch, rnd = Math.random) {
     skill, lane: (rnd() - 0.5) * 16, reactT: 0.15 + rnd() * 0.55, wait: 0, stuckT: 0,
     seen: null, willJump: false, nf: 0.6 + rnd() * 1.2, np: rnd() * 6.28,
     sway: 0.05 + (1 - skill) * 0.22, jumpiness: 0.55 + skill * 0.4, think: rnd() / 30,
+    diveSeen: null, diveOk: true, aggro: rnd() * rnd(), tackleCd: 0, tackleSeen: null, tackleGo: false,
   };
 }
 
@@ -863,7 +864,7 @@ export function stepWorld(w, chars, dt) {
   for (const ch of chars) {
     if (ch.bot) {
       ch.bot.think -= dt;
-      if (ch.bot.think <= 0) { ch.bot.think += 1 / 30; botThink(w, ch, 1 / 30); }
+      if (ch.bot.think <= 0) { ch.bot.think += 1 / 30; botThink(w, ch, 1 / 30, chars); }
     }
     stepChar(w, ch, dt);
   }
@@ -905,10 +906,11 @@ function insideXZ(c, x, z, m = 0) {
 }
 
 // Height of the walkable surface under (x,z) near `refY`, or null for a gap.
-export function groundAt(w, x, z, refY) {
+// `soft` also counts tiles that are shaking: they still hold for another second.
+export function groundAt(w, x, z, refY, soft = false) {
   let best = null;
   for (const c of w.colliders) {
-    if (!c.active || c.kind === 'gate' || c.state === 'fall' || c.state === 'shake') continue;
+    if (!c.active || c.kind === 'gate' || c.state === 'fall' || (c.state === 'shake' && !soft)) continue;
     const top = c.cy + c.hy;
     if (top > refY + 1.4 || top < refY - 2.5) continue;
     if (insideXZ(c, x, z) && (best === null || top > best)) best = top;
@@ -926,9 +928,114 @@ function obstacleAhead(w, ch, dirx, dirz) {
   return null;
 }
 
-export function botThink(w, ch, dt) {
+// Dives. A diving bean is only DIVE_H tall, so it slides under anything whose underside is above that but
+// below standing height (the high sweepers), and it flattens any runner it hits fast enough (see charVsChar).
+const DIVE_LOOK = 0.4;                      // seconds ahead that bots watch for a sweeper about to hit them
+const DIVE_REACH = [2.5, 4.5, 7, 10];       // a dive carries a bean ~10.7 m: it needs ground along the way or it slides off
+const DIVE_AIR = 0.28;                      // s before a dive touches down; friction only starts after that
+const TACKLE_COOLDOWN = 5;                  // s between a bot's tackles
+
+// [t, metres travelled, speed] every 0.05 s of a dive: flight at DIVE_V, then sliding friction (see stepChar).
+const DIVE_PATH = [];
+for (let t = 0.05, s = 0; t < 0.92; t += 0.05) {
+  const v = t <= DIVE_AIR ? DIVE_V : Math.max(0, DIVE_V - 7 * (t - DIVE_AIR));
+  s += v * 0.05;
+  DIVE_PATH.push([t, s, v]);
+}
+
+// Something a duck gets us under: its underside clears a diver but not a runner.
+function overheadBlock(ch, c) {
+  const gap = c.cy - c.hy - ch.y;
+  return gap > DIVE_H + 0.05 && gap < H;
+}
+
+// Would a bean moving at (vx, vz) be inside box c within DIVE_LOOK seconds? Sweepers keep turning, so the box
+// is advanced by its own omega (and pistons and the like by their velocity).
+function overheadHit(c, ch, vx, vz) {
+  if (Math.hypot(ch.x - c.cx, ch.z - c.cz) > c.ext + R + 1.5 + Math.hypot(vx, vz) * DIVE_LOOK) return false;
+  const p = { cx: 0, cz: 0, ext: c.ext, hx: c.hx, hz: c.hz, yaw: 0 };
+  for (let t = 0; t <= DIVE_LOOK; t += 0.05) {
+    p.cx = c.cx + c.vx * t; p.cz = c.cz + c.vz * t; p.yaw = c.yaw + c.omega * t;
+    if (insideXZ(p, ch.x + vx * t, ch.z + vz * t, R + 0.25)) return true;
+  }
+  return false;
+}
+
+// Is there somewhere to land? A dive goes the way the bean faces and can't be steered. It touches down at
+// ~3.7 m and slides out to ~10.7 m, so it wants ground near each of those. Every point may be a little off
+// (the seams between tiles are no reason to stay put) and shaking tiles still count; a course full of
+// vanishing tiles never offers a perfect runway, and a bad landing costs no more than the bar would.
+function diveLandsSafe(w, ch) {
+  const hx = Math.sin(ch.heading), hz = Math.cos(ch.heading);
+  const ground = (d) => [0, -0.6, 0.6].some((o) => groundAt(w, ch.x + hx * (d + o), ch.z + hz * (d + o), ch.y, true) !== null);
+  return (ground(DIVE_REACH[0]) || ground(DIVE_REACH[1])) && (ground(DIVE_REACH[2]) || ground(DIVE_REACH[3]));
+}
+
+// Does the dive run into something a diver can't get under (a low sweeper, a piston)? Once a bean is diving it
+// is committed for ~0.9 s, with no hopping, so it must not carry itself into the next sweeper's reach.
+// The hop peaks just under 0.3 m, so a bean's top while diving stays below ch.y + 0.8.
+function diveRunsIntoHazard(w, ch) {
+  const hx = Math.sin(ch.heading), hz = Math.cos(ch.heading);
+  const p = { cx: 0, cz: 0, ext: 0, hx: 0, hz: 0, yaw: 0 };
+  for (const c of w.colliders) {
+    if (!c.active || !c.hazard || c.cy - c.hy >= ch.y + 0.8 || c.cy + c.hy <= ch.y) continue;
+    const reach = c.ext + R + 0.5;
+    if ((ch.x - c.cx) ** 2 + (ch.z - c.cz) ** 2 > (reach + DIVE_PATH[DIVE_PATH.length - 1][1]) ** 2) continue;
+    p.ext = c.ext; p.hx = c.hx; p.hz = c.hz;
+    for (const [t, s] of DIVE_PATH) {
+      p.cx = c.cx + c.vx * t; p.cz = c.cz + c.vz * t; p.yaw = c.yaw + c.omega * t;
+      if (insideXZ(p, ch.x + hx * s, ch.z + hz * s, R + 0.2)) return true;
+    }
+  }
+  return false;
+}
+
+// A runner this bot's dive would catch: replays the dive against where the runner will be, and wants the
+// closing speed past the 4 m/s that flattens somebody. A shove is meant to cost time, not a fall, so the
+// runner needs solid ground under and beyond them (never at an edge or over a gap).
+function tackleTarget(w, ch, chars) {
+  const hx = Math.sin(ch.heading), hz = Math.cos(ch.heading);
+  for (const o of chars) {
+    if (o === ch || o.ghost || o.finished || o.invuln > 0 || o.state !== 'run' || Math.abs(o.y - ch.y) > 0.8) continue;
+    if ((o.x - ch.x) * hx + (o.z - ch.z) * hz < 1.2) continue;      // behind us or already touching
+    if ([0, 1.5, 3].some((d) => groundAt(w, o.x + hx * d, o.z + hz * d, o.y) === null)) continue;
+    for (const [t, s, v] of DIVE_PATH) {
+      if (t > 0.7 || v - (o.vx * hx + o.vz * hz) < 4.6) continue;
+      const dx = o.x + o.vx * t - (ch.x + hx * s), dz = o.z + o.vz * t - (ch.z + hz * s);
+      if (dx * dx + dz * dz < (2 * R + 0.1) ** 2) return o;
+    }
+  }
+  return null;
+}
+
+// Decide whether to dive this tick: under a sweeper that's about to catch us, or into a runner ahead.
+function botDive(w, ch, b, wx, wz, chars) {
+  let threat = null;
+  const vx = wx * ch.maxSpeed, vz = wz * ch.maxSpeed;
+  for (const c of w.colliders) {
+    if (!c.active || c.kind === 'gate' || !overheadBlock(ch, c)) continue;
+    if (overheadHit(c, ch, vx, vz)) { threat = c; break; }
+  }
+  if (threat) {
+    // Like hopping a bar: each pass gets noticed or missed once, and the less skilled miss it more often.
+    if (b.diveSeen !== threat) { b.diveSeen = threat; b.diveOk = Math.random() > (1 - b.skill) * 0.3; }
+    return b.diveOk && diveLandsSafe(w, ch) && !diveRunsIntoHazard(w, ch);
+  }
+  b.diveSeen = null;
+
+  if (b.tackleCd > 0 || !chars) return false;
+  const o = tackleTarget(w, ch, chars);
+  if (!o) { b.tackleSeen = null; return false; }
+  if (b.tackleSeen !== o) { b.tackleSeen = o; b.tackleGo = Math.random() < b.aggro; }
+  if (!b.tackleGo || !diveLandsSafe(w, ch) || diveRunsIntoHazard(w, ch)) return false;
+  b.tackleCd = TACKLE_COOLDOWN;
+  return true;
+}
+
+export function botThink(w, ch, dt, chars) {
   const b = ch.bot;
   ch.wishX = ch.wishZ = 0;
+  if (b.tackleCd > 0) b.tackleCd -= dt;
   if (!w.racing || ch.finished || ch.state !== 'run') return;
   if (b.reactT > 0) { b.reactT -= dt; return; }
 
@@ -945,6 +1052,8 @@ export function botThink(w, ch, dt) {
   let wx = dx * ca - dz * sa, wz = dx * sa + dz * ca;
 
   if (ch.grounded) {
+    if (botDive(w, ch, b, wx, wz, chars)) { ch.diveReq = true; ch.wishX = wx; ch.wishZ = wz; return; }
+
     // Gap ahead? Jump if there is somewhere to land, otherwise wait at the edge.
     if (groundAt(w, ch.x + wx * 1.1, ch.z + wz * 1.1, ch.y) === null) {
       let found = false;
