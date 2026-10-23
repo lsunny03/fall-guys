@@ -1479,10 +1479,26 @@ async function boot() {
   $('startBtn').addEventListener('click', () => send({ t: 'start' }));
   $('leaveBtn').addEventListener('click', () => { send({ t: 'leave' }); toMenu(); });
   $('lobbyLeave').addEventListener('click', () => { send({ t: 'leave' }); toMenu(); });
-  $('copyBtn').addEventListener('click', async () => {
+  // The toast lives in the HUD, which is hidden in the lobby, so feedback goes on the button itself.
+  let copyT = 0;
+  const copyBtn = $('copyBtn');
+  const copyNote = (text) => {
+    copyBtn.textContent = text;
+    clearTimeout(copyT); copyT = setTimeout(() => (copyBtn.textContent = 'Copy invite link'), 2000);
+  };
+  const copyText = async (text) => {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* blocked in iframes / non-secure pages */ }
+    const ta = document.createElement('textarea');       // legacy fallback
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:-100px;opacity:0';
+    document.body.append(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { /* ignore */ }
+    ta.remove();
+    return ok;
+  };
+  copyBtn.addEventListener('click', async () => {
     const link = `${location.origin}${location.pathname}?room=${N.code}`;
-    try { await navigator.clipboard.writeText(link); toast('Invite link copied', 1400); }
-    catch { toast(`Room code: ${N.code}`, 2500); }
+    copyNote((await copyText(link)) ? 'Copied!' : `Code: ${N.code}`);
   });
   const invited = new URLSearchParams(location.search).get('room');
   if (invited) {
