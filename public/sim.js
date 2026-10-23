@@ -12,7 +12,8 @@ export const FALL_Y = -12;        // below this a bean respawns at its checkpoin
 export const STEP = 1 / 120;      // fixed simulation step
 export const QUALIFY = 8;         // finishers that make the cut
 export const START_Z = 14;
-const CRUSH_CLEAR = 2.6;      // how far a raised press hangs above its floor: a bean (H) walks under with room to spare
+const CRUSH_CLEAR = 5.2;      // how far a raised press hangs above its floor: a bean (H) walks under with room to spare
+const CRUSH_FALL = 2 / 3;     // a press's fall lasts this fraction of its rise: it covers the same stroke at 3x the old speed (the stroke doubled)
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const wrapPi = (a) => {
@@ -135,11 +136,25 @@ export function createWorld(levelIdx = 0) {
   // A top-down press over solid floor at height `y`: it rests on the floor and rises CRUSH_CLEAR m clear of it.
   // Standing under it as it comes down is fatal (see collide); standing on it as it rises gives you a ride.
   // `at(t)` is its centre height at world time t, so bots can time their runs under it.
-  const crusher = (x, z, { wd = 6.6, dp = 3.5, y = 0, f = 1.3, ph = 0, amp = 0.8, hy = 0.4 } = {}) => {
+  // The cycle runs in phase units (f = units/s): rise, dwell up, fall, dwell down. The rise and both dwells last as
+  // they always did (the old sine, clamped); only the fall is shortened. `ph` is in radians of a full 2π turn.
+  const crusher = (x, z, { wd = 6.6, dp = 3.5, y = 0, f = 1.3, ph = 0, amp = 0.8, hy = 1.2 } = {}) => {
     const lo = y + hy, hi = y + CRUSH_CLEAR + hy;
+    const riseW = 2 * Math.asin(Math.min(1, 0.5 / amp)), dwell = Math.PI - riseW, fallW = riseW * CRUSH_FALL;
+    const cycle = riseW + dwell + fallW + dwell, off = (ph * cycle) / (2 * Math.PI);
+    const ease = (x) => 0.5 - 0.5 * Math.cos(Math.PI * x);
     const c = add({ kind: 'crusher', cx: x, cy: hi, cz: z, hx: wd / 2, hy, hz: dp / 2, crush: true, dynamic: true });
     c.floor = y;
-    c.at = (t) => lo + (hi - lo) * clamp(0.5 + amp * Math.sin(t * f + ph), 0, 1);
+    c.at = (t) => {
+      let u = (t * f + off) % cycle;
+      if (u < 0) u += cycle;
+      let k;
+      if (u < riseW) k = ease(u / riseW);
+      else if (u < riseW + dwell) k = 1;
+      else if (u < riseW + dwell + fallW) k = 1 - ease((u - riseW - dwell) / fallW);
+      else k = 0;
+      return lo + (hi - lo) * k;
+    };
     c.update = (m, world, dt) => {
       const n = m.at(world.t);
       m.dy = n - m.cy; m.cy = n; m.vy = dt > 0 ? m.dy / dt : 0;
