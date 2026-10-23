@@ -148,6 +148,7 @@ const visuals = [];                       // { mesh, c } for every collider that
 const course = new THREE.Group();         // everything specific to the current level
 scene.add(course);
 const floaters = [];
+const flameVis = [];                      // { f, nozzle, layers[], glow } for every flamethrower of the course
 const beltAnim = new Map();               // arrow texture -> belt velocity, scrolled every frame
 
 // Chevron texture for conveyor belts. In the canvas "up" is -Z and "right" is +X on the deck's top face.
@@ -216,6 +217,9 @@ function buildCourse(w) {
         mesh = g;
         break;
       }
+      case 'housing':                                 // the wall block a flamethrower is bolted to
+        mesh = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), new THREE.MeshStandardMaterial({ color: '#3b434d', metalness: 0.6, roughness: 0.4 }));
+        break;
       case 'bar':
         mesh = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2),
           new THREE.MeshStandardMaterial({ map: stripeTex(c.color, '#ffffff', w2 / 1.8), roughness: 0.4 }));
@@ -244,6 +248,45 @@ function buildCourse(w) {
     if (!c.dynamic && c.kind !== 'gate') { mesh.updateMatrix(); mesh.matrixAutoUpdate = false; }
     course.add(mesh);
     visuals.push({ mesh, c });
+  }
+  buildFlames(w);
+}
+
+// Flamethrowers: a nozzle that glows red just before it fires, then layered additive cones for the jet.
+const FLAME_WARN = 0.7;                   // s of warning glow before ignition
+function buildFlames(w) {
+  const add = { transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide };
+  for (const f of w.flames) {
+    const g = new THREE.Group();
+    const nozzleMat = new THREE.MeshStandardMaterial({ color: '#59616b', metalness: 0.6, roughness: 0.4, emissive: '#ff3b1f', emissiveIntensity: 0 });
+    const layers = [];
+    let nozzle;
+    if (f.kind === 'wall') {                                          // a jet along x, pointing away from the wall
+      nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.5, 1.1, 14), nozzleMat);
+      nozzle.rotation.z = Math.PI / 2; nozzle.position.set(f.nx + f.dir * 0.55, f.ny, f.cz);
+      const reach = f.hx * 2;
+      for (const [r, col, op] of [[1.0, '#ff5a1f', 0.7], [0.62, '#ffb020', 0.8], [0.3, '#fff2a8', 0.9]]) {
+        const cone = new THREE.Mesh(new THREE.ConeGeometry(r, reach, 14, 1, true), new THREE.MeshBasicMaterial({ color: col, opacity: op, ...add }));
+        cone.rotation.z = f.dir > 0 ? -Math.PI / 2 : Math.PI / 2;       // cone tip (+y) turned along the jet
+        cone.geometry.translate(0, reach / 2, 0);
+        cone.position.set(f.nx + f.dir * 1.1, f.ny, f.cz);
+        cone.scale.y = 0.001; layers.push(cone); g.add(cone);
+      }
+    } else {                                                           // a vent: a column straight up from the deck's middle
+      nozzle = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1.2, 0.45, 18), nozzleMat);
+      nozzle.position.set(f.cx, f.y + 0.22, f.cz);
+      for (const [r, col, op] of [[2.7, '#ff5a1f', 0.55], [1.7, '#ffb020', 0.7], [0.9, '#fff2a8', 0.9]]) {
+        const cone = new THREE.Mesh(new THREE.ConeGeometry(r, f.h, 18, 1, true), new THREE.MeshBasicMaterial({ color: col, opacity: op, ...add }));
+        cone.geometry.translate(0, f.h / 2, 0);
+        cone.position.set(f.cx, f.y + 0.3, f.cz); cone.scale.y = 0.001; layers.push(cone); g.add(cone);
+      }
+    }
+    nozzle.castShadow = true;
+    const glow = new THREE.Mesh(new THREE.PlaneGeometry(f.hx * 2, f.hz * 2).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: '#ff5a1f', opacity: 0, ...add }));     // the scorched footprint lights up while it burns
+    glow.position.set(f.cx, f.y + 0.06, f.cz);
+    g.add(nozzle, glow); course.add(g);
+    flameVis.push({ f, nozzle, layers, glow });
   }
 }
 
@@ -404,7 +447,7 @@ function clearCourse() {
     }
   });
   course.clear();
-  visuals.length = 0; floaters.length = 0; beltAnim.clear();
+  visuals.length = 0; floaters.length = 0; beltAnim.clear(); flameVis.length = 0;
 }
 
 // Swap in course `idx`. Returns true when something changed (callers then re-sync the local sim).
@@ -748,7 +791,10 @@ function onSnap(m) {
     if (!ch) continue;
     if (type === 'l' && ch !== player) { const v = vis.get(id); if (v) v.squash = Math.min(0.5, val / 35); }
     if (ch !== player || !mine) continue;
-    if (type === 'q') { squashed = true; sfx.bonk(); cam.shake = 0.8; }
+    if (type === 'u') {
+      if (player.state !== 'stun') { adopt(mine, 'b'); adopted = true; }
+      sfx.bonk(); cam.shake = 0.6; toast('Burned!', 900);
+    } else if (type === 'q') { squashed = true; sfx.bonk(); cam.shake = 0.8; }
     else if (type === 'r') { adopt(mine, 'r'); adopted = true; flash(); toast(squashed ? 'Squashed! Back to the checkpoint' : 'Oops! Back to the checkpoint', 1500); }
     else if (type === 'b' && player.state !== 'stun') { adopt(mine, 'b'); adopted = true; sfx.bonk(); cam.shake = 0.5; toast('Bonk!', 900); }
     else if (type === 'f') sfx.fall();
@@ -1300,7 +1346,27 @@ function updateCamera(dt, time) {
   camera.lookAt(f);
 }
 
+function updateFlames(time) {
+  const t = world.t;
+  for (const { f, nozzle, layers, glow } of flameVis) {
+    const u = (t + f.ph) % f.period;
+    const warn = u > f.period - FLAME_WARN ? (u - (f.period - FLAME_WARN)) / FLAME_WARN : 0;      // 0 -> 1 into ignition
+    const k = u < f.burn ? Math.min(1, u / 0.18) * Math.min(1, (f.burn - u) / 0.25 + 0.2) : 0;     // quick ignite, tail off
+    nozzle.material.emissiveIntensity = k > 0 ? 1.2 : warn * (0.6 + 0.4 * Math.sin(time * 30));
+    glow.material.opacity = k * (0.28 + 0.1 * Math.sin(time * 25));
+    layers.forEach((cone, i) => {
+      const fl = 1 + 0.07 * Math.sin(time * (22 + i * 7) + i * 2 + f.cz);
+      cone.visible = k > 0 || warn > 0;
+      const len = k > 0 ? k : 0.05 * warn;                 // a pilot flame flickers during the warning
+      cone.scale.y = Math.max(0.001, len * fl);
+      const wid = 1 + 0.1 * Math.sin(time * (31 + i * 5) + i);
+      cone.scale.x = cone.scale.z = k > 0 ? wid : 0.35;
+    });
+  }
+}
+
 function updateVisuals(dt, time) {
+  updateFlames(time);
   for (const [tex, b] of beltAnim) {                  // scroll the chevrons the way the belt carries you (4 m per pattern)
     tex.offset.x = -(b.x / 4) * time;
     tex.offset.y = (b.z / 4) * time;

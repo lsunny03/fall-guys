@@ -13,6 +13,8 @@ export const STEP = 1 / 120;      // fixed simulation step
 export const QUALIFY = 8;         // finishers that make the cut
 export const START_Z = 14;
 const CRUSH_CLEAR = 5.2;      // how far a raised press hangs above its floor: a bean (H) walks under with room to spare
+const FLAME_PERIOD = 5;       // a flamethrower fires once per period...
+const FLAME_BURN = 2;         // ...for this many seconds
 const CRUSH_FALL = 2 / 3;     // a press's fall lasts this fraction of its rise: it covers the same stroke at 3x the old speed (the stroke doubled)
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -46,7 +48,7 @@ export function createWorld(levelIdx = 0) {
   const lv = LEVELS[levelIdx] || LEVELS[0];
   const w = {
     t: 0, raceT: 0, racing: false, lobby: false, mirror: false, raceOver: false, finishers: [],
-    colliders: [], movers: [], tiles: [], crushers: [], checkpoints: [{ x: 0, y: 0, z: START_Z }], gate: null,
+    colliders: [], movers: [], tiles: [], crushers: [], flames: [], checkpoints: [{ x: 0, y: 0, z: START_Z }], gate: null,
     levelIdx: LEVELS.indexOf(lv), level: lv,
     onEvent: null,
   };
@@ -162,6 +164,23 @@ export function createWorld(levelIdx = 0) {
     w.crushers.push(c);
     return c;
   };
+  // Flamethrowers. A flame is a non-solid zone (box cx/cz/hx/hz, from height y up to y + h) that burns whatever
+  // stands in it while it is firing: on for FLAME_BURN s of every FLAME_PERIOD s, `ph` seconds into the cycle at
+  // world time 0. The server burns (see stepWorld); the zone is a pure function of w.t, so bots and visuals can read it.
+  const flame = (f) => {
+    f.ext = Math.hypot(f.hx, f.hz); f.period = FLAME_PERIOD; f.burn = FLAME_BURN;
+    f.on = (t) => (t + f.ph) % FLAME_PERIOD < FLAME_BURN;
+    w.flames.push(f);
+    return f;
+  };
+  // Wall-mounted: a housing on the wall at x = side * wall that spews inward across `reach` m of the floor at z.
+  const wallFlame = (z, side, { y = 0, ph = 0, wall = 10, reach = 20 / 3 } = {}) => {
+    add({ kind: 'housing', cx: side * (wall + 0.5), cy: y + 1.2, cz: z, hx: 0.5, hy: 1.2, hz: 1.1 });
+    return flame({ kind: 'wall', cx: side * (wall - reach / 2), cz: z, hx: reach / 2, hz: 1, y, h: 2.6, ph, dir: -side, nx: side * wall, ny: y + 1.1 });
+  };
+  // A vent in the middle of a deck (wd x dp) that blasts straight up over all of it.
+  const ventFlame = (x, z, { wd = 5, dp = 5.5, y = 0, ph = 0 } = {}) =>
+    flame({ kind: 'vent', cx: x, cz: z, hx: wd / 2, hz: dp / 2, y, h: 6, ph, dir: 0, nx: x, ny: y });
   // A hydraulic lift: a deck whose surface slides between `lo` and `hi`, lingering at both ends so it can be boarded and left.
   const lift = (x, z, { wd = 10, dp = 8, lo = 0, hi = 4, f = 0.8, ph = 0, amp = 0.75, pal = ['#ffffff', '#ffd166'] } = {}) => {
     const hy = 0.5;
@@ -177,7 +196,7 @@ export function createWorld(levelIdx = 0) {
   plat(0, 0, 8, 30, 32, { cp: 0, pal: ['#ffffff', '#ffc2dc'], label: 'start' });
   w.gate = add({ kind: 'gate', cx: 0, cy: 1.5, cz: 12.5, hx: 15, hy: 1.5, hz: 0.4 });
 
-  lv.build(w, { add, plat, cp, bar, osc, tileField, tile, piston, slider, crusher, lift });
+  lv.build(w, { add, plat, cp, bar, osc, tileField, tile, piston, slider, crusher, lift, wallFlame, ventFlame });
 
   resetWorld(w);
   return w;
@@ -186,7 +205,7 @@ export function createWorld(levelIdx = 0) {
 /* ------------------------------------------------------------------ */
 /* Levels                                                              */
 /* ------------------------------------------------------------------ */
-// build(w, kit)  lays out everything beyond the start pad (kit = add, plat, cp, bar, osc, tileField, tile, piston, slider, crusher, lift).
+// build(w, kit)  lays out everything beyond the start pad (kit = add, plat, cp, bar, osc, tileField, tile, piston, slider, crusher, lift, wallFlame, ventFlame).
 // finish         {z, y}: crossing z while standing at height >= y-1 qualifies (y is the summit's top).
 // ai(w, ch, b)   optional steering hint for bots: {tx, tz?} = where to aim instead of their usual lane.
 // theme          colours and scenery style for the renderer.
@@ -691,7 +710,7 @@ export const LEVELS = [
       sky: ['#314a43', '#6b9080', '#f6e8b1'], fog: '#cfe0d6', ground: '#84a98c', goo: '#b8f400', gooGlow: '#3a5a00',
       pastel: ['#a4c3b2', '#84a98c', '#cad2c5', '#f0b429', '#52796f', '#e9edc9'], scenery: 'factory', accent: '#f0b429', smog: '#9aa89d',
     },
-    build(w, { plat, cp, bar, piston, crusher }) {
+    build(w, { plat, cp, bar, piston, crusher, wallFlame }) {
       const metal = (c) => ['#ffffff', c];
       // 1: a belt running back at you, with a sweeper, a row of presses and a high sweeper to dive under
       plat(0, 0, -30, 24, 44, { belt: { x: 0, z: 3 }, pal: metal('#9fb4c4') });
@@ -713,6 +732,10 @@ export const LEVELS = [
       plat(0, 0, -135, 20, 10, { belt: { x: -4.5, z: 0 }, pal: metal('#b4f8c8') });
       plat(0, 0, -145, 20, 10, { belt: { x: 4.5, z: 0 }, pal: metal('#a0e7e5') });
       bar(-135, 1.6, 0, '#ff5d73', { len: 7 });
+      // Each belt carries you toward a flamethrower on the wall it pushes you at; the jet reaches a third of the way across.
+      wallFlame(-124, 1, { ph: 0 });
+      wallFlame(-132, -1, { ph: 1.7 });
+      wallFlame(-146, 1, { ph: 3.4 });
       plat(0, 0, -157, 24, 14, { cp: cp(0, -154, 0, 12), pal: metal('#ffe3a3') });
 
       // 4: the press hall: presses and pistons in turn, then a launch pad up to the summit
@@ -727,7 +750,7 @@ export const LEVELS = [
     },
     ai(w, ch, b) {
       const z = ch.z;
-      if (z < -120 && z > -150) return { tx: 0 };               // stay centred while the side belts push
+      if (z < -120 && z > -150) return { tx: (z > -130 || z < -140 ? -2.5 : 2.5) };      // lean away from the wall the belt pushes toward
       return { tx: lanes(b, 0.45) };
     },
   },
@@ -784,7 +807,7 @@ export const LEVELS = [
       sky: ['#0a1230', '#14407a', '#27e8c8'], fog: '#7fe3d6', ground: '#3a5fa0', goo: '#ff2bd6', gooGlow: '#6b0a5a',
       pastel: ['#2de2c8', '#7b5cff', '#ff4fd8', '#3a86ff', '#b6ff3b', '#1b2a5c'], scenery: 'rack', accent: '#2de2c8', smog: '#1a2a5a',
     },
-    build(w, { plat, cp, bar, osc, tileField, crusher, lift }) {
+    build(w, { plat, cp, bar, osc, tileField, crusher, lift, ventFlame }) {
       const board = (c) => ['#12204a', c];
       w.zones = {};
       // A: the bus. Three traces over the void, each with its own hazard; they merge again at the end.
@@ -795,7 +818,10 @@ export const LEVELS = [
       bar(-44, -2.0, 1.0, '#b6ff3b', { len: 3.4, high: true, tall: true });
       const neon = ['#2de2c8', '#7b5cff', '#ff4fd8', '#3a86ff'];
       for (let i = 0; i < 6; i++) {              // "data packets": decks that slide back and forth along the trace
-        osc(plat(8, 0, -13 - 8 * i, 5, 5.5, { kind: 'mover', pal: board(neon[i % neon.length]) }), 'z', 1.4, 1.0 + 0.12 * (i % 3), i * 1.7);
+        if (i % 2) {                             // the 2nd, 4th and 6th are fixed decks with a flamethrower blasting up through them
+          plat(8, 0, -13 - 8 * i, 5, 5.5, { pal: board(neon[i % neon.length]) });
+          ventFlame(8, -13 - 8 * i, { ph: ((i - 1) / 2) * 1.7 });
+        } else osc(plat(8, 0, -13 - 8 * i, 5, 5.5, { kind: 'mover', pal: board(neon[i % neon.length]) }), 'z', 1.4, 1.0 + 0.12 * (i % 3), i * 1.7);
       }
       plat(0, 0, -64, 28, 12, { cp: cp(0, -62, 0, 14), pal: board('#3a86ff') });
 
@@ -916,6 +942,15 @@ export function stun(w, ch, time) {
   if (ch.finished || ch.state === 'done') return;
   ch.state = 'stun'; ch.stateT = time; ch.bonks++;
   emit(w, 'bonk', ch);
+}
+
+// Caught in a flame: stunned and flung out of it (sideways along a wall jet, back along the deck for a vent).
+function burn(w, ch, f) {
+  ch.state = 'stun'; ch.stateT = 1; ch.bonks++;
+  if (f.kind === 'wall') { ch.vx = f.dir * 8; ch.vz = 0; }
+  else { ch.vx = (ch.x - f.cx) * 1.2; ch.vz = ((ch.z >= f.cz) ? 1 : -1) * 5; }
+  ch.vy = 5; ch.grounded = false; ch.ground = null; ch.coyote = 0;
+  emit(w, 'burn', ch);
 }
 
 function respawn(w, ch) {
@@ -1122,6 +1157,17 @@ export function stepWorld(w, chars, dt) {
   charVsChar(w, chars);
   if (w.mirror) return;                  // client copy: the server decides falls and finishes
 
+  if (w.racing) {
+    for (const f of w.flames) {
+      if (!f.on(w.t)) continue;
+      for (const ch of chars) {
+        if (ch.finished || ch.ghost || ch.invuln > 0 || ch.state === 'stun' || ch.y > f.y + f.h || ch.y + H < f.y) continue;
+        if (Math.abs(ch.x - f.cx) > f.hx + 0.1 || Math.abs(ch.z - f.cz) > f.hz + 0.1) continue;
+        burn(w, ch, f);
+      }
+    }
+  }
+
   for (const ch of chars) {
     if (ch.squashed) {
       ch.squashed = false;
@@ -1269,6 +1315,32 @@ function tackleTarget(w, ch, chars) {
 // known function of time, so a bot replays its own run (at full speed, ignoring belts) against it. Once a bot is
 // under a press it is committed and keeps running. Weaker bots occasionally charge in regardless.
 const PRESS_LOOK = 1.1;                     // s ahead that bots watch for a press they would run under
+function flameHold(w, ch, b, wx, wz) {
+  if (ch.ground && ch.ground.belt) return false;                // standing still on a belt only carries you into the jet
+  const sp = ch.maxSpeed;
+  const p = { cx: 0, cz: 0, ext: 0, hx: 0, hz: 0, yaw: 0 };
+  for (const f of w.flames) {
+    if (Math.abs(ch.y - f.y) > 1.5 || Math.hypot(ch.x - f.cx, ch.z - f.cz) > f.ext + sp * PRESS_LOOK + 2) continue;
+    p.cx = f.cx; p.cz = f.cz; p.ext = f.ext; p.hx = f.hx; p.hz = f.hz;
+    if (insideXZ(p, ch.x, ch.z, 0.3)) continue;                  // already in it: keep going
+    let tIn = -1, tOut = -1;
+    for (let t = 0.05; t <= PRESS_LOOK; t += 0.05) if (insideXZ(p, ch.x + wx * sp * t, ch.z + wz * sp * t, 1.0)) { tIn = t; break; }
+    if (tIn < 0) continue;
+    for (let t = tIn; t <= PRESS_LOOK + 1.5; t += 0.05) {
+      if (insideXZ(p, ch.x + wx * sp * 0.7 * t, ch.z + wz * sp * 0.7 * t, 0.3)) tOut = t;
+      else if (tOut >= 0) break;
+    }
+    if (tOut < 0) tOut = tIn;
+    for (let t = Math.max(0, tIn - 0.1); t <= tOut + 0.35; t += 0.05) {
+      if (f.on(w.t + t)) {
+        if (b.flameSeen !== f) { b.flameSeen = f; b.flameRush = Math.random() < (1 - b.skill) * 0.12; }
+        return !b.flameRush;
+      }
+    }
+  }
+  return false;
+}
+
 function pressHold(w, ch, b, wx, wz) {
   const sp = ch.maxSpeed;
   const p = { cx: 0, cz: 0, ext: 0, hx: 0, hz: 0, yaw: 0 };
@@ -1343,13 +1415,13 @@ export function botThink(w, ch, dt, chars) {
   let wx = dx * ca - dz * sa, wz = dx * sa + dz * ca;
 
   if (ch.grounded) {
-    if (pressHold(w, ch, b, wx, wz)) {
+    if (pressHold(w, ch, b, wx, wz) || flameHold(w, ch, b, wx, wz)) {
       // Blocked: lean toward a lane that is open right now (towards the bot's own lane first), else stand off.
       let open = false;
       const s = Math.sign(b.lane - ch.x) || 1;
       for (const a of [0.45 * s, -0.45 * s, 0.9 * s, -0.9 * s]) {
         const ca = Math.cos(a), sa = Math.sin(a), tx = wx * ca - wz * sa, tz = wx * sa + wz * ca;
-        if (groundAt(w, ch.x + tx * 1.5, ch.z + tz * 1.5, ch.y) === null || pressHold(w, ch, b, tx, tz)) continue;
+        if (groundAt(w, ch.x + tx * 1.5, ch.z + tz * 1.5, ch.y) === null || pressHold(w, ch, b, tx, tz) || flameHold(w, ch, b, tx, tz)) continue;
         wx = tx; wz = tz; open = true; break;
       }
       if (!open) { ch.wishX = ch.wishZ = 0; return; }
