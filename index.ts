@@ -25,12 +25,13 @@ const COLORS = ['#ff4d6d', '#ff9f1c', '#ffd60a', '#7bd72b', '#2ec4b6', '#3a86ff'
 const BOT_NAMES = ['Bean Machine', 'Jelly Roll', 'Waddles', 'Sir Bounce', 'Cap’n Wobble', 'Pudding', 'Noodle', 'Gizmo', 'Sprout', 'Biscuit', 'Pickles', 'Mochi', 'Zigzag', 'Tater Tot', 'Muffin'];
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const STATE_CODE: Record<string, number> = { run: 0, dive: 1, stun: 2, done: 3 };
-const EVENT_CODE: Record<string, string> = { bonk: 'b', respawn: 'r', fall: 'f', finish: 'F', jump: 'j', dive: 'd', land: 'l' };
+const EVENT_CODE: Record<string, string> = { bonk: 'b', respawn: 'r', fall: 'f', finish: 'F', jump: 'j', dive: 'd', land: 'l', squash: 'q' };
 
 // Grand prix cups: each runs its courses in this order. The host of a private room picks the cup.
 const CUPS = [
   { name: 'Classic Cup', courses: ['Sweeper', 'Conveyor', 'Slip', 'Sky'] },
   { name: 'Fall Cup', courses: ['Fall Zone', 'Froggier', 'Zigzags', 'The Great Climb'] },
+  { name: 'Factory Cup', courses: ['Piston Plant', 'Assembly Line', 'Hydraulic Press', 'Circuit Breaker'] },
 ].map((c) => ({ name: c.name, order: c.courses.map((k) => S.LEVELS.findIndex((l: any) => l.name.startsWith(k))).filter((i) => i >= 0) }));
 
 const r2 = (v: number) => Math.round(v * 100) / 100;

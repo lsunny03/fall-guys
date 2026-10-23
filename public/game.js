@@ -176,7 +176,7 @@ function buildCourse(w) {
     const w2 = c.hx * 2, h2 = c.hy * 2, d2 = c.hz * 2;
     let mesh;
     switch (c.kind) {
-      case 'platform': case 'mover': case 'step': {
+      case 'platform': case 'mover': case 'step': case 'lift': {
         const [c1, c2] = c.pal;
         const side = new THREE.MeshStandardMaterial({ color: darker(c2), roughness: 0.7 });
         let top;
@@ -193,6 +193,27 @@ function buildCourse(w) {
           top = new THREE.MeshStandardMaterial({ map: checkerTex(c1, c2, w2 / 4, d2 / 4), roughness: 0.6 });
         }
         mesh = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), [side, side, top, side, side, side]);
+        if (c.kind === 'lift') {                      // a hydraulic ram under the deck, running down into the dark
+          const g = new THREE.Group();
+          const ram = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 40, 16), new THREE.MeshStandardMaterial({ color: '#9aa4ae', metalness: 0.7, roughness: 0.3 }));
+          ram.position.y = -c.hy - 20; ram.castShadow = true;
+          g.add(mesh, ram);
+          mesh.castShadow = mesh.receiveShadow = true;
+          mesh = g;
+        }
+        break;
+      }
+      case 'crusher': {                               // hazard-striped head on a steel rod; the red underside is the warning
+        const g = new THREE.Group();
+        const side = new THREE.MeshStandardMaterial({ map: stripeTex('#2b2f36', '#ffc400', Math.max(2, w2 / 1.5)), roughness: 0.5, metalness: 0.2 });
+        const cap = new THREE.MeshStandardMaterial({ color: '#59616b', roughness: 0.45, metalness: 0.5 });
+        const under = new THREE.MeshStandardMaterial({ color: '#ff3b1f', emissive: '#ff3b1f', emissiveIntensity: 0.5, roughness: 0.4 });
+        const head = new THREE.Mesh(new THREE.BoxGeometry(w2, h2, d2), [side, side, cap, under, side, side]);
+        const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 14, 14), new THREE.MeshStandardMaterial({ color: '#9aa4ae', metalness: 0.7, roughness: 0.3 }));
+        rod.position.y = c.hy + 7;
+        for (const m of [head, rod]) { m.castShadow = true; m.receiveShadow = true; }
+        g.add(head, rod);
+        mesh = g;
         break;
       }
       case 'bar':
@@ -219,7 +240,7 @@ function buildCourse(w) {
     }
     mesh.position.set(c.cx, c.cy, c.cz);
     mesh.rotation.y = c.yaw;
-    if (c.kind !== 'gate') { mesh.castShadow = c.kind !== 'tile'; mesh.receiveShadow = true; }
+    if (c.kind !== 'gate' && c.kind !== 'lift' && c.kind !== 'crusher') { mesh.castShadow = c.kind !== 'tile'; mesh.receiveShadow = true; }
     if (!c.dynamic && c.kind !== 'gate') { mesh.updateMatrix(); mesh.matrixAutoUpdate = false; }
     course.add(mesh);
     visuals.push({ mesh, c });
@@ -314,6 +335,21 @@ function buildDecor(lv) {
     const parts = [];
     if (th.scenery === 'cone') {           // ice spires
       parts.push(new THREE.Mesh(new THREE.ConeGeometry(r * 1.3, h + 8, 6), m)); parts[0].position.set(x, h / 2 - 4, z);
+    } else if (th.scenery === 'factory' || th.scenery === 'rack') {
+      const accent = new THREE.MeshStandardMaterial({ color: th.accent, emissive: th.accent, emissiveIntensity: th.scenery === 'rack' ? 1 : 0.35, roughness: 0.5 });
+      if (th.scenery === 'rack') {          // server racks with glowing bands
+        const bw = r * 1.4;
+        const body = new THREE.Mesh(new THREE.BoxGeometry(bw, h + 8, bw), m); body.position.set(x, h / 2 - 4, z); parts.push(body);
+        for (let k = 0; k < 4; k++) {
+          const band = new THREE.Mesh(new THREE.BoxGeometry(bw * 1.04, 0.5, bw * 1.04), accent);
+          band.position.set(x, 3 + k * (h / 4), z); parts.push(band);
+        }
+      } else {                              // warehouse halls with smokestacks
+        const bw = r * 2.2;
+        const hall = new THREE.Mesh(new THREE.BoxGeometry(bw * 1.7, 12 + (i % 3) * 5 + 8, bw), m); hall.position.set(x, (12 + (i % 3) * 5) / 2 - 4, z); parts.push(hall);
+        const stack = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.35, r * 0.5, h + 8, 14), m); stack.position.set(x + bw * 0.7, h / 2 - 4, z); parts.push(stack);
+        const band = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.53, r * 0.53, 1.4, 14), accent); band.position.set(x + bw * 0.7, h - 4, z); parts.push(band);
+      }
     } else if (th.scenery === 'box') {      // factory silos
       parts.push(new THREE.Mesh(new THREE.BoxGeometry(r * 1.7, h + 8, r * 1.7), m)); parts[0].position.set(x, h / 2 - 4, z);
       const roof = new THREE.Mesh(new THREE.BoxGeometry(r * 1.2, 2.5, r * 1.2), m); roof.position.set(x, h + 0.4, z); parts.push(roof);
@@ -326,13 +362,15 @@ function buildDecor(lv) {
   }
   const nBalls = Math.max(14, Math.round(26 * (len + 60) / 300));
   for (let i = 0; i < nBalls; i++) {
-    const m = new THREE.Mesh(new THREE.SphereGeometry(1.2 + Math.random() * 2.2, 18, 12),
-      new THREE.MeshStandardMaterial({ color: pastel[i % pastel.length], roughness: 0.3 }));
+    const rad = 1.2 + Math.random() * 2.2, tech = th.scenery === 'factory' || th.scenery === 'rack';
+    const m = new THREE.Mesh(tech ? new THREE.TorusGeometry(rad * 1.3, rad * 0.4, 8, 12) : new THREE.SphereGeometry(rad, 18, 12),
+      new THREE.MeshStandardMaterial({ color: pastel[i % pastel.length], roughness: 0.3, metalness: tech ? 0.5 : 0 }));
+    if (tech) m.rotation.set(Math.random() * 3, Math.random() * 3, 0);
     m.position.set((Math.random() < 0.5 ? -1 : 1) * (22 + Math.random() * 30), 6 + Math.random() * 22, 40 - Math.random() * (len + 60));
     m.userData = { base: m.position.y, ph: Math.random() * 6.28, sp: 0.4 + Math.random() * 0.8 };
     course.add(m); floaters.push(m);
   }
-  const cloudMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1, emissive: '#ffffff', emissiveIntensity: 0.35 });
+  const cloudMat = new THREE.MeshStandardMaterial({ color: th.smog || '#ffffff', roughness: 1, emissive: th.smog || '#ffffff', emissiveIntensity: th.smog ? 0.15 : 0.35 });
   for (let i = 0; i < Math.max(12, Math.round(22 * (len + 60) / 300)); i++) {
     const g = new THREE.Group();
     for (let j = 0; j < 4; j++) {
@@ -704,12 +742,14 @@ function onSnap(m) {
 
   const mine = player ? map.get(player.id) : null;
   let adopted = false;
+  let squashed = false;
   for (const [type, id, val] of m.ev) {
     const ch = byId.get(id);
     if (!ch) continue;
     if (type === 'l' && ch !== player) { const v = vis.get(id); if (v) v.squash = Math.min(0.5, val / 35); }
     if (ch !== player || !mine) continue;
-    if (type === 'r') { adopt(mine, 'r'); adopted = true; flash(); toast('Oops! Back to the checkpoint', 1500); }
+    if (type === 'q') { squashed = true; sfx.bonk(); cam.shake = 0.8; }
+    else if (type === 'r') { adopt(mine, 'r'); adopted = true; flash(); toast(squashed ? 'Squashed! Back to the checkpoint' : 'Oops! Back to the checkpoint', 1500); }
     else if (type === 'b' && player.state !== 'stun') { adopt(mine, 'b'); adopted = true; sfx.bonk(); cam.shake = 0.5; toast('Bonk!', 900); }
     else if (type === 'f') sfx.fall();
     else if (type === 'F') onMeFinished();
@@ -1270,6 +1310,10 @@ function updateVisuals(dt, time) {
     mesh.visible = c.active;
     mesh.position.set(c.cx, c.cy, c.cz);
     mesh.rotation.y = c.yaw;
+    if (c.kind === 'crusher') {
+      const under = mesh.children[0].material[3];
+      under.emissiveIntensity = c.vy < -0.15 ? 1.6 : c.vy > 0.15 ? 0.25 : 0.55;
+    }
     if (c.kind === 'tile') {
       const shaking = c.state === 'shake';
       if (shaking) mesh.position.x += Math.sin(time * 90 + c.id) * 0.07;

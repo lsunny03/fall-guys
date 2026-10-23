@@ -12,6 +12,7 @@ export const FALL_Y = -12;        // below this a bean respawns at its checkpoin
 export const STEP = 1 / 120;      // fixed simulation step
 export const QUALIFY = 8;         // finishers that make the cut
 export const START_Z = 14;
+const CRUSH_CLEAR = 2.6;      // how far a raised press hangs above its floor: a bean (H) walks under with room to spare
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const wrapPi = (a) => {
@@ -44,7 +45,7 @@ export function createWorld(levelIdx = 0) {
   const lv = LEVELS[levelIdx] || LEVELS[0];
   const w = {
     t: 0, raceT: 0, racing: false, lobby: false, mirror: false, raceOver: false, finishers: [],
-    colliders: [], movers: [], tiles: [], checkpoints: [{ x: 0, y: 0, z: START_Z }], gate: null,
+    colliders: [], movers: [], tiles: [], crushers: [], checkpoints: [{ x: 0, y: 0, z: START_Z }], gate: null,
     levelIdx: LEVELS.indexOf(lv), level: lv,
     onEvent: null,
   };
@@ -131,11 +132,37 @@ export function createWorld(levelIdx = 0) {
     return c;
   };
 
+  // A top-down press over solid floor at height `y`: it rests on the floor and rises CRUSH_CLEAR m clear of it.
+  // Standing under it as it comes down is fatal (see collide); standing on it as it rises gives you a ride.
+  // `at(t)` is its centre height at world time t, so bots can time their runs under it.
+  const crusher = (x, z, { wd = 6.6, dp = 3.5, y = 0, f = 1.3, ph = 0, amp = 0.8, hy = 0.4 } = {}) => {
+    const lo = y + hy, hi = y + CRUSH_CLEAR + hy;
+    const c = add({ kind: 'crusher', cx: x, cy: hi, cz: z, hx: wd / 2, hy, hz: dp / 2, crush: true, dynamic: true });
+    c.floor = y;
+    c.at = (t) => lo + (hi - lo) * clamp(0.5 + amp * Math.sin(t * f + ph), 0, 1);
+    c.update = (m, world, dt) => {
+      const n = m.at(world.t);
+      m.dy = n - m.cy; m.cy = n; m.vy = dt > 0 ? m.dy / dt : 0;
+    };
+    w.crushers.push(c);
+    return c;
+  };
+  // A hydraulic lift: a deck whose surface slides between `lo` and `hi`, lingering at both ends so it can be boarded and left.
+  const lift = (x, z, { wd = 10, dp = 8, lo = 0, hi = 4, f = 0.8, ph = 0, amp = 0.75, pal = ['#ffffff', '#ffd166'] } = {}) => {
+    const hy = 0.5;
+    const c = add({ kind: 'lift', cx: x, cy: hi - hy, cz: z, hx: wd / 2, hy, hz: dp / 2, dynamic: true, pal });
+    c.update = (m, world, dt) => {
+      const n = lo - hy + (hi - lo) * clamp(0.5 + amp * Math.sin(world.t * f + ph), 0, 1);
+      m.dy = n - m.cy; m.cy = n; m.vy = dt > 0 ? m.dy / dt : 0;
+    };
+    return c;
+  };
+
   // Shared start pad (+ the gate that drops on GO). Every level starts here, so the lobby is the same everywhere.
   plat(0, 0, 8, 30, 32, { cp: 0, pal: ['#ffffff', '#ffc2dc'], label: 'start' });
   w.gate = add({ kind: 'gate', cx: 0, cy: 1.5, cz: 12.5, hx: 15, hy: 1.5, hz: 0.4 });
 
-  lv.build(w, { add, plat, cp, bar, osc, tileField, tile, piston, slider });
+  lv.build(w, { add, plat, cp, bar, osc, tileField, tile, piston, slider, crusher, lift });
 
   resetWorld(w);
   return w;
@@ -144,7 +171,7 @@ export function createWorld(levelIdx = 0) {
 /* ------------------------------------------------------------------ */
 /* Levels                                                              */
 /* ------------------------------------------------------------------ */
-// build(w, kit)  lays out everything beyond the start pad (kit = add, plat, cp, bar, osc, tileField, tile, piston, slider).
+// build(w, kit)  lays out everything beyond the start pad (kit = add, plat, cp, bar, osc, tileField, tile, piston, slider, crusher, lift).
 // finish         {z, y}: crossing z while standing at height >= y-1 qualifies (y is the summit's top).
 // ai(w, ch, b)   optional steering hint for bots: {tx, tz?} = where to aim instead of their usual lane.
 // theme          colours and scenery style for the renderer.
@@ -596,6 +623,208 @@ export const LEVELS = [
       return { tx: lanes(b, 0.5) };
     },
   },
+
+  /* ---- Factory Cup: tech courses with top-down presses (kit.crusher) and hydraulic lifts (kit.lift) ---- */
+
+  {
+    id: 'pistonplant',
+    name: 'Piston Plant',
+    blurb: 'Presses stamp the floor, pistons shove from the sides, and a hydraulic lift hauls you up to the crown. Never stand under a press on its way down.',
+    finish: { z: -192, y: 3 },
+    theme: {
+      sky: ['#1d2b3a', '#3f5a70', '#f6a04d'], fog: '#c9b8a6', ground: '#7d8a96', goo: '#ff7a1a', gooGlow: '#8a2b00',
+      pastel: ['#8fa3b3', '#6f8396', '#c5d0d8', '#f2a65a', '#4f6272', '#e0b88a'], scenery: 'factory', accent: '#ffb300', smog: '#8a8f98',
+    },
+    build(w, { plat, cp, piston, crusher, lift }) {
+      const steel = (c) => ['#ffffff', c];
+      // A: the stamping floor. Rows of three presses side by side, each a third of a cycle behind the next.
+      plat(0, 0, -31, 20, 46, { cp: cp(0, -13, 0, 12), pal: steel('#b0bec5') });
+      [-22, -32, -42].forEach((z, k) => {
+        for (let i = 0; i < 3; i++) crusher((i - 1) * 6.6, z, { wd: 6.6, f: 1.25 + 0.08 * k, ph: k * 1.3 + i * 2.09 });
+      });
+      plat(0, 0, -58, 20, 10, { cp: cp(0, -56, 0, 12), pal: steel('#ffe3a3') });
+
+      // B: a narrow bridge: pistons shove from the side while presses come down across the whole deck.
+      plat(0, 0, -90, 12, 52, { pal: steel('#9fb4c4') });
+      [[-72, 1, 1.5, 0], [-88, -1, 1.6, 2.2], [-104, 1, 1.4, 4.1]].forEach(([z, side, f, ph]) => piston(z, side, f, ph, { from: 10.3, to: 4 }));
+      [[-80, 1.2, 0.5], [-96, 1.25, 2.6], [-110, 1.3, 4.4]].forEach(([z, f, ph]) => crusher(0, z, { wd: 12, dp: 4, f, ph }));
+      plat(0, 0, -122, 20, 12, { cp: cp(0, -120, 0, 12), pal: steel('#ffe3a3') });
+
+      // C: the lift up onto the top deck, where presses and pistons alternate on the way to the summit.
+      lift(0, -133, { wd: 10, dp: 8, lo: 0, hi: 3, f: 0.8, pal: steel('#ffd166') });
+      plat(0, 3, -160, 20, 46, { cp: cp(3, -141, 0, 10), pal: steel('#b0bec5') });
+      [-147, -157, -167].forEach((z, k) => {
+        for (let i = 0; i < 3; i++) crusher((i - 1) * 6.6, z, { wd: 6.6, y: 3, f: 1.4 + 0.1 * k, ph: k * 0.9 + i * 2.09 });
+      });
+      [[-152, 1, 1.5, 0.6], [-162, -1, 1.6, 2.4], [-172, 1, 1.45, 4.2]].forEach(([z, side, f, ph]) => piston(z, side, f, ph, { from: 14.3, to: 4, y: 3 }));
+      plat(0, 3, -194, 18, 22, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      const z = ch.z;
+      if (z < -64 && z > -116) return { tx: Math.sin(w.t * b.nf + b.np) * 2.5 };      // stay on the bridge
+      if (z < -122 && z > -140) return { tx: 0 };                                       // board the lift in the middle
+      return { tx: lanes(b, 0.45) };
+    },
+  },
+
+  {
+    id: 'assembly',
+    name: 'Assembly Line',
+    blurb: 'One long production line: belts against you and with you, presses, sweepers and pistons, then a bounce-pad launch to the crown.',
+    finish: { z: -214, y: 4 },
+    theme: {
+      sky: ['#314a43', '#6b9080', '#f6e8b1'], fog: '#cfe0d6', ground: '#84a98c', goo: '#b8f400', gooGlow: '#3a5a00',
+      pastel: ['#a4c3b2', '#84a98c', '#cad2c5', '#f0b429', '#52796f', '#e9edc9'], scenery: 'factory', accent: '#f0b429', smog: '#9aa89d',
+    },
+    build(w, { plat, cp, bar, piston, crusher }) {
+      const metal = (c) => ['#ffffff', c];
+      // 1: a belt running back at you, with a sweeper, a row of presses and a high sweeper to dive under
+      plat(0, 0, -30, 24, 44, { belt: { x: 0, z: 3 }, pal: metal('#9fb4c4') });
+      bar(-24, 1.3, 0, '#ff5d73', { len: 9 });
+      for (let i = 0; i < 3; i++) crusher((i - 1) * 8, -33, { wd: 8, dp: 3.5, f: 1.3, ph: i * 2.09 });
+      bar(-46, -1.5, 1.2, '#ffb703', { high: true, tall: true, len: 10 });
+      plat(0, 0, -58, 24, 12, { cp: cp(0, -56, 0, 12), pal: metal('#ffe3a3') });
+
+      // 2: a fast belt carrying you with it, through sweepers and side pistons
+      plat(0, 0, -86, 24, 44, { belt: { x: 0, z: -4 }, pal: metal('#ffb4a2') });
+      bar(-74, 1.5, 0.4, '#ff5d73', { len: 8 });
+      bar(-92, -1.6, 1.8, '#ffb703', { high: true, tall: true, len: 9 });
+      piston(-83, 1, 1.5, 0, { from: 16.3, to: 7 });
+      piston(-101, -1, 1.6, 2.2, { from: 16.3, to: 7 });
+      plat(0, 0, -114, 24, 12, { cp: cp(0, -112, 0, 12), pal: metal('#ffe3a3') });
+
+      // 3: sorting belts that shove you sideways, with a sweeper over the middle one
+      plat(0, 0, -125, 20, 10, { belt: { x: 4.5, z: 0 }, pal: metal('#a0e7e5') });
+      plat(0, 0, -135, 20, 10, { belt: { x: -4.5, z: 0 }, pal: metal('#b4f8c8') });
+      plat(0, 0, -145, 20, 10, { belt: { x: 4.5, z: 0 }, pal: metal('#a0e7e5') });
+      bar(-135, 1.6, 0, '#ff5d73', { len: 7 });
+      plat(0, 0, -157, 24, 14, { cp: cp(0, -154, 0, 12), pal: metal('#ffe3a3') });
+
+      // 4: the press hall: presses and pistons in turn, then a launch pad up to the summit
+      plat(0, 0, -181.5, 24, 35, { pal: metal('#b0bec5') });
+      [-171, -182, -193].forEach((z, k) => {
+        for (let i = 0; i < 3; i++) crusher((i - 1) * 8, z, { wd: 8, dp: 3.5, f: 1.35 + 0.1 * k, ph: k * 1.1 + i * 2.09 });
+      });
+      piston(-176.5, 1, 1.5, 0.5, { from: 16.3, to: 7 });
+      piston(-187.5, -1, 1.6, 2.8, { from: 16.3, to: 7 });
+      plat(0, 0, -200, 24, 2, { bounce: 24, pal: ['#ffffff', '#ff7ab6'] });
+      plat(0, 4, -222, 24, 30, { cp: cp(4, -212, 0, 10), pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      const z = ch.z;
+      if (z < -120 && z > -150) return { tx: 0 };               // stay centred while the side belts push
+      return { tx: lanes(b, 0.45) };
+    },
+  },
+
+  {
+    id: 'press',
+    name: 'Hydraulic Press',
+    blurb: 'Three tiers of presses, with a hydraulic lift between each. Time every crossing, ride up, and do it again higher.',
+    finish: { z: -219, y: 12 },
+    theme: {
+      sky: ['#241b4a', '#6a4c93', '#ffa573'], fog: '#d6c2d9', ground: '#8b7bb0', goo: '#35e0ff', gooGlow: '#0b4a66',
+      pastel: ['#9d8ec7', '#c3b5e6', '#ffb38a', '#7a6aa8', '#e6d8f5', '#ffcf9e'], scenery: 'factory', accent: '#ff8c42', smog: '#8f84ad',
+    },
+    build(w, { plat, cp, crusher, lift }) {
+      const steel = (c) => ['#ffffff', c];
+      const tint = ['#c3b5e6', '#ffd6a5', '#bfe6ff'];
+      let z = -8, tier = 0;
+      // A deck at height y, `dp` deep; rows of presses (`n` side by side, each out of step with its neighbour) sit on it.
+      const deck = (y, dp, rows, n, f, pdp = 3.5) => {
+        const z0 = z;
+        plat(0, y, z0 - dp / 2, 20, dp, { cp: cp(y, z0 - 4, 0, 10), pal: steel(tint[tier % tint.length]) });
+        rows.forEach((dz, k) => {
+          for (let i = 0; i < n; i++) crusher(-10 + (20 / n) * (i + 0.5), z0 - dz, { wd: 20 / n, dp: pdp, y, f: f + 0.07 * k, ph: k * 1.1 + (i * 2 * Math.PI) / n });
+        });
+        z -= dp; tier++;
+      };
+      // A rest ledge, then a lift from height `lo` to `hi` (a metre of gap before it, none after).
+      const rest = (y) => { plat(0, y, z - 6, 20, 12, { cp: cp(y, z - 4, 0, 10), pal: steel('#ffe3a3') }); z -= 12; };
+      const up = (lo, hi, f, ph) => { z -= 1; lift(0, z - 4, { wd: 12, dp: 8, lo, hi, f, ph, pal: steel('#ffd166') }); w.zones.lifts.push([z + 1, z - 8]); z -= 8; };
+      w.zones = { lifts: [] };
+
+      deck(0, 44, [12, 22, 32], 3, 1.25);
+      rest(0); up(0, 4, 0.75, 0);
+      deck(4, 46, [10, 18, 26, 34], 2, 1.2);
+      rest(4); up(4, 8, 0.8, 1.5);
+      deck(8, 50, [10, 19, 28, 37], 5, 1.45, 2.4);
+      rest(8); up(8, 12, 0.85, 3);
+      plat(0, 12, z - 12, 22, 24, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+      w.zones.end = z;
+    },
+    ai(w, ch, b) {
+      const z = ch.z;
+      if (w.zones.lifts.some(([a, c]) => z < a && z > c - 4)) return { tx: 0 };         // board lifts in the middle
+      return { tx: lanes(b, 0.45) };
+    },
+  },
+
+  {
+    id: 'circuit',
+    name: 'Circuit Breaker',
+    blurb: 'Pick a trace of the bus (presses, a belt with sweepers, or crumbling tiles), launch across the capacitors and ride the lift to the CPU.',
+    finish: { z: -209, y: 5 },
+    theme: {
+      sky: ['#0a1230', '#14407a', '#27e8c8'], fog: '#7fe3d6', ground: '#3a5fa0', goo: '#ff2bd6', gooGlow: '#6b0a5a',
+      pastel: ['#2de2c8', '#7b5cff', '#ff4fd8', '#3a86ff', '#b6ff3b', '#1b2a5c'], scenery: 'rack', accent: '#2de2c8', smog: '#1a2a5a',
+    },
+    build(w, { plat, cp, bar, osc, tileField, crusher, lift }) {
+      const board = (c) => ['#12204a', c];
+      w.zones = {};
+      // A: the bus. Three traces over the void, each with its own hazard; they merge again at the end.
+      plat(-8, 0, -33, 5, 50, { pal: board('#2de2c8') });
+      [-22, -34, -46].forEach((z, k) => crusher(-8, z, { wd: 5, dp: 3.5, f: 1.3 + 0.1 * k, ph: k * 1.9 }));
+      plat(0, 0, -33, 5, 50, { belt: { x: 0, z: 2 }, pal: board('#7b5cff') });
+      bar(-22, 1.8, 0, '#ff4fd8', { len: 3.4 });
+      bar(-44, -2.0, 1.0, '#b6ff3b', { len: 3.4, high: true, tall: true });
+      const neon = ['#2de2c8', '#7b5cff', '#ff4fd8', '#3a86ff'];
+      for (let i = 0; i < 6; i++) {              // "data packets": decks that slide back and forth along the trace
+        osc(plat(8, 0, -13 - 8 * i, 5, 5.5, { kind: 'mover', pal: board(neon[i % neon.length]) }), 'z', 1.4, 1.0 + 0.12 * (i % 3), i * 1.7);
+      }
+      plat(0, 0, -64, 28, 12, { cp: cp(0, -62, 0, 14), pal: board('#3a86ff') });
+
+      // B: capacitors. A launch pad throws you 7 m across the void to the next island.
+      let z = -70;
+      const jump = (dp, onIsland) => {
+        plat(0, 0, z - 1, 16, 2, { bounce: 22, pal: ['#ffffff', '#ff4fd8'] });
+        z -= 9;                                    // pad (2 m) + the 7 m gap
+        const zc = z - dp / 2;
+        plat(0, 0, zc, 16, dp, { cp: cp(0, zc + dp / 2 - 2, 0, 10), pal: board('#7b5cff') });
+        onIsland(zc);
+        z -= dp;
+      };
+      jump(14, (zc) => bar(zc, 1.6, 0, '#ff4fd8', { len: 7.5 }));
+      jump(14, (zc) => { for (let i = 0; i < 2; i++) crusher(-4 + 8 * i, zc, { wd: 8, dp: 3.5, f: 1.35, ph: i * Math.PI }); });
+      w.zones.capEnd = z;
+
+      // C: bit rot. Crumbling tiles, then a rest deck.
+      tileField(z - 4, 5, 71, neon);
+      z -= 4 + 4 * 4 + 4;
+      plat(0, 0, z - 8, 24, 16, { cp: cp(0, z - 4, 0, 12), pal: board('#3a86ff') });
+      z -= 16;
+
+      // D: the CPU. A lift up to the sweeper bridge, with presses between the sweepers, then the summit.
+      z -= 1;
+      lift(0, z - 4, { wd: 10, dp: 8, lo: 0, hi: 5, f: 1.0, pal: board('#b6ff3b') });
+      w.zones.lift = [z + 1, z - 8];
+      z -= 8;
+      plat(0, 5, z - 18, 10, 36, { cp: cp(5, z - 3, 0, 6), pal: board('#2de2c8') });
+      crusher(0, z - 11, { wd: 10, y: 5, f: 1.4, ph: 0.5 });
+      bar(z - 21, -2.0, 1.0, '#b6ff3b', { y: 5, len: 4.8, high: true, tall: true });
+      crusher(0, z - 31, { wd: 10, y: 5, f: 1.5, ph: 2.4 });
+      w.zones.bridge = [z, z - 36];
+      z -= 36;
+      plat(0, 5, z - 12, 22, 24, { pal: ['#fff6bf', '#ffd23f'], label: 'summit' });
+    },
+    ai(w, ch, b) {
+      const z = ch.z, zn = w.zones;
+      if (z < -8 && z > -58) return { tx: b.lane < -2.7 ? -8 : b.lane > 2.7 ? 8 : 0 };      // each bean sticks to one trace
+      if (zn.lift && z < zn.lift[0] && z > zn.lift[1] - 4) return { tx: 0 };
+      if (zn.bridge && z < zn.bridge[0] && z > zn.bridge[1]) return { tx: Math.sin(w.t * b.nf + b.np) * 0.6 };
+      return { tx: lanes(b, 0.45) };
+    },
+  },
 ];
 
 function tileUpdate(c, w, dt) {
@@ -642,7 +871,7 @@ export function createChar({ id, name, color, isPlayer = false }) {
     id, name, color, isPlayer, bot: null,
     x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, heading: Math.PI,
     grounded: false, ground: null, coyote: 0, jumpBuf: 0, landV: 0,
-    state: 'run', stateT: 0, wishX: 0, wishZ: 0, jumpReq: false, diveReq: false,
+    state: 'run', stateT: 0, wishX: 0, wishZ: 0, jumpReq: false, diveReq: false, squashed: false,
     maxSpeed: RUN, cp: 0, finished: false, finishT: 0, finishOrder: -1,
     falls: 0, bonks: 0, invuln: 0, ghost: false, t: 0,
   };
@@ -652,7 +881,7 @@ export function resetChar(ch, x, z) {
   Object.assign(ch, {
     x, y: 0, z, vx: 0, vy: 0, vz: 0, heading: Math.PI, grounded: false, ground: null,
     coyote: 0, jumpBuf: 0, landV: 0, state: 'run', stateT: 0, wishX: 0, wishZ: 0,
-    jumpReq: false, diveReq: false, cp: 0, finished: false, finishT: 0, finishOrder: -1,
+    jumpReq: false, diveReq: false, squashed: false, cp: 0, finished: false, finishT: 0, finishOrder: -1,
     falls: 0, bonks: 0, invuln: 0, ghost: false,
   });
 }
@@ -664,7 +893,7 @@ export function initBot(ch, rnd = Math.random) {
     skill, lane: (rnd() - 0.5) * 16, reactT: 0.15 + rnd() * 0.55, wait: 0, stuckT: 0,
     seen: null, willJump: false, nf: 0.6 + rnd() * 1.2, np: rnd() * 6.28,
     sway: 0.05 + (1 - skill) * 0.22, jumpiness: 0.55 + skill * 0.4, think: rnd() / 30,
-    diveSeen: null, diveOk: true, aggro: rnd() * rnd(), tackleCd: 0, tackleSeen: null, tackleGo: false,
+    pressSeen: null, pressRush: false, diveSeen: null, diveOk: true, aggro: rnd() * rnd(), tackleCd: 0, tackleSeen: null, tackleGo: false,
   };
 }
 
@@ -699,6 +928,13 @@ function collide(w, ch, c, dt) {
   const ox = lx - clamp(lx, -c.hx, c.hx), oz = lz - clamp(lz, -c.hz, c.hz);
   const d2 = ox * ox + oz * oz;
   if (d2 >= R * R) return;
+
+  // A press: caught beneath it as it comes down is fatal (the server decides; a client copy just stays solid
+  // and waits to be told); bumping into its underside from below only costs the jump.
+  if (c.crush && ch.y < bot - 0.2 && d2 < 0.0625 && !ch.finished) {
+    if (c.dy < -1e-5) { if (!w.mirror && ch.invuln <= 0) ch.squashed = true; }
+    else if (ch.vy > 0) { ch.y = bot - H; ch.vy = 0; return; }
+  }
 
   // Land on top when the feet are near the surface and we are not rising.
   const tol = 0.35 + Math.max(0, -ch.vy) * dt;
@@ -872,6 +1108,10 @@ export function stepWorld(w, chars, dt) {
   if (w.mirror) return;                  // client copy: the server decides falls and finishes
 
   for (const ch of chars) {
+    if (ch.squashed) {
+      ch.squashed = false;
+      if (!ch.finished) { emit(w, 'squash', ch); respawn(w, ch); continue; }
+    }
     if (ch.y < FALL_Y && !ch.finished) { emit(w, 'fall', ch); respawn(w, ch); continue; }
     if (!ch.finished && w.racing && ch.z < w.level.finish.z && ch.y > w.level.finish.y - 1) {
       ch.finished = true; ch.finishT = w.raceT; ch.finishOrder = w.finishers.length;
@@ -945,6 +1185,7 @@ for (let t = 0.05, s = 0; t < 0.92; t += 0.05) {
 
 // Something a duck gets us under: its underside clears a diver but not a runner.
 function overheadBlock(ch, c) {
+  if (c.crush) return false;               // ducking under a press only gets you flattened
   const gap = c.cy - c.hy - ch.y;
   return gap > DIVE_H + 0.05 && gap < H;
 }
@@ -978,7 +1219,8 @@ function diveRunsIntoHazard(w, ch) {
   const hx = Math.sin(ch.heading), hz = Math.cos(ch.heading);
   const p = { cx: 0, cz: 0, ext: 0, hx: 0, hz: 0, yaw: 0 };
   for (const c of w.colliders) {
-    if (!c.active || !c.hazard || c.cy - c.hy >= ch.y + 0.8 || c.cy + c.hy <= ch.y) continue;
+    if (!c.active || !(c.hazard || c.crush)) continue;
+    if (!c.crush && (c.cy - c.hy >= ch.y + 0.8 || c.cy + c.hy <= ch.y)) continue;      // a press is judged by its footprint alone
     const reach = c.ext + R + 0.5;
     if ((ch.x - c.cx) ** 2 + (ch.z - c.cz) ** 2 > (reach + DIVE_PATH[DIVE_PATH.length - 1][1]) ** 2) continue;
     p.ext = c.ext; p.hx = c.hx; p.hz = c.hz;
@@ -1006,6 +1248,40 @@ function tackleTarget(w, ch, chars) {
     }
   }
   return null;
+}
+
+// Presses: stand off until the whole crossing fits inside a window where the press is up. A press's height is a
+// known function of time, so a bot replays its own run (at full speed, ignoring belts) against it. Once a bot is
+// under a press it is committed and keeps running. Weaker bots occasionally charge in regardless.
+const PRESS_LOOK = 1.1;                     // s ahead that bots watch for a press they would run under
+function pressHold(w, ch, b, wx, wz) {
+  const sp = ch.maxSpeed;
+  const p = { cx: 0, cz: 0, ext: 0, hx: 0, hz: 0, yaw: 0 };
+  for (const c of w.crushers) {
+    if (!c.active || Math.abs(ch.y - c.floor) > 1.2 || Math.hypot(ch.x - c.cx, ch.z - c.cz) > c.ext + sp * PRESS_LOOK + 2) continue;
+    p.cx = c.cx; p.cz = c.cz; p.ext = c.ext; p.hx = c.hx; p.hz = c.hz;
+    if (insideXZ(p, ch.x, ch.z, 0.3)) continue;
+    // Entering is judged at full speed, leaving at 70% of it (a crowd slows everyone), and a bot stands a metre
+    // off the press so a shove from behind doesn't put it underneath.
+    let tIn = -1, tOut = -1;
+    for (let t = 0.05; t <= PRESS_LOOK; t += 0.05) {
+      if (insideXZ(p, ch.x + wx * sp * t, ch.z + wz * sp * t, 1.2)) { tIn = t; break; }
+    }
+    if (tIn < 0) continue;
+    for (let t = tIn; t <= PRESS_LOOK + 1; t += 0.05) {
+      if (insideXZ(p, ch.x + wx * sp * 0.7 * t, ch.z + wz * sp * 0.7 * t, 0.3)) tOut = t;
+      else if (tOut >= 0) break;
+    }
+    if (tOut < 0) tOut = tIn;
+    let lethal = false;
+    for (let t = Math.max(0, tIn - 0.1); t <= tOut + 0.35; t += 0.05) {
+      if (c.at(w.t + t) - c.hy < c.floor + H + 0.15) { lethal = true; break; }
+    }
+    if (!lethal) continue;
+    if (b.pressSeen !== c) { b.pressSeen = c; b.pressRush = Math.random() < (1 - b.skill) * 0.12; }
+    if (!b.pressRush) return true;
+  }
+  return false;
 }
 
 // Decide whether to dive this tick: under a sweeper that's about to catch us, or into a runner ahead.
@@ -1052,6 +1328,17 @@ export function botThink(w, ch, dt, chars) {
   let wx = dx * ca - dz * sa, wz = dx * sa + dz * ca;
 
   if (ch.grounded) {
+    if (pressHold(w, ch, b, wx, wz)) {
+      // Blocked: lean toward a lane that is open right now (towards the bot's own lane first), else stand off.
+      let open = false;
+      const s = Math.sign(b.lane - ch.x) || 1;
+      for (const a of [0.45 * s, -0.45 * s, 0.9 * s, -0.9 * s]) {
+        const ca = Math.cos(a), sa = Math.sin(a), tx = wx * ca - wz * sa, tz = wx * sa + wz * ca;
+        if (groundAt(w, ch.x + tx * 1.5, ch.z + tz * 1.5, ch.y) === null || pressHold(w, ch, b, tx, tz)) continue;
+        wx = tx; wz = tz; open = true; break;
+      }
+      if (!open) { ch.wishX = ch.wishZ = 0; return; }
+    }
     if (botDive(w, ch, b, wx, wz, chars)) { ch.diveReq = true; ch.wishX = wx; ch.wishZ = wz; return; }
 
     // Gap ahead? Jump if there is somewhere to land, otherwise wait at the edge.
